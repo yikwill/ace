@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH -A m4492_g
+#SBATCH -A m1266_g
 #SBATCH -q regular
 #SBATCH -C gpu
 #SBATCH -J train-fme
@@ -13,6 +13,8 @@
 #SBATCH --signal=USR1@60
 #SBATCH --requeue
 #SBATCH --open-mode=append
+#SBATCH --mail-user=yikwill@uw.edu
+#SBATCH --mail-type=ALL
 
 # for pre-emptible jobs, update -q to preempt
 
