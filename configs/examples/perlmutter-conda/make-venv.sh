@@ -9,9 +9,9 @@ else
     rm -rf $SCRATCH/ace-slurm-env/temp/
     mkdir -p $SCRATCH/ace-slurm-env/temp/
     cd $SCRATCH/ace-slurm-env/temp/
-    git clone git@github.com:ai2cm/ace.git
+    git clone git@github.com:yikwill/ace.git
     if [ $? -ne 0 ]; then
-        echo "Failed to clone repository git@github.com:ai2cm/ace.git"
+        echo "Failed to clone repository git@github.com:yikwill/ace.git"
         exit 1
     fi
 
