@@ -1333,3 +1333,71 @@ def test_multi_symmetric_isolatitude_compile_and_smoothed_upsample():
     y_up = up(x)
     assert y_up.shape[-2:] == (img * 2, img * 2)
     assert th.isfinite(y_up).all()
+
+
+def test_recunet_isolatitude_compile_padding_nside_sequence():
+    conv_cfg = ConvBlockConfig(
+        block_type="ConvNeXtBlock",
+        in_channels=3,
+        out_channels=3,
+        latent_channels=8,
+        kernel_size=3,
+        dilation=1,
+        activation=CappedGELUConfig(cap_value=10),
+    )
+    encoder = UNetEncoderConfig(
+        conv_block=conv_cfg,
+        down_sampling_block=DownsamplingBlockConfig(block_type="AvgPool", pooling=2),
+        input_channels=5,
+        n_channels=[16, 32, 64],
+        n_layers=[1, 1, 1],
+        dilations=[1, 1, 1],
+    )
+    decoder = UNetDecoderConfig(
+        conv_block=ConvBlockConfig(
+            block_type="ConvNeXtBlock",
+            in_channels=3,
+            out_channels=3,
+            latent_channels=8,
+            kernel_size=3,
+            dilation=1,
+            activation=CappedGELUConfig(cap_value=10),
+        ),
+        up_sampling_block=ConvBlockConfig(
+            block_type="TransposedConvUpsample",
+            in_channels=3,
+            out_channels=3,
+            stride=2,
+            activation=CappedGELUConfig(cap_value=10),
+        ),
+        output_layer=ConvBlockConfig(
+            block_type="BasicConvBlock",
+            in_channels=3,
+            out_channels=4,
+            kernel_size=1,
+            n_layers=1,
+        ),
+        recurrent_block=RecurrentBlockConfig(block_type="ConvGRUBlock", kernel_size=1),
+        n_channels=[64, 32, 16],
+        n_layers=[1, 1, 1],
+        output_channels=4,
+        dilations=[1, 1, 1],
+    )
+    model = HEALPixRecUNet(
+        encoder=encoder,
+        decoder=decoder,
+        input_channels=3,
+        output_channels=4,
+        prognostic_variables=3,
+        n_constants=1,
+        decoder_input_channels=1,
+        input_time_size=1,
+        output_time_size=1,
+        hpx_padding_mode="isolatitude",
+        compile_padding=True,
+        nside=[64, 32, 16],
+    )
+    x = th.randn(1, 12, 5, 64, 64)
+    y = model(x)
+    assert y.shape == (1, 12, 4, 64, 64)
+    assert th.isfinite(y).all()

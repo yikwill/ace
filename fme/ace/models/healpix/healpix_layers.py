@@ -105,29 +105,25 @@ class HEALPixLayer(nn.Module):
         else:
             enable_nhwc = False
 
-        kernel_size = 3 if "kernel_size" not in kwargs else kwargs["kernel_size"]
-        dilation = 1 if "dilation" not in kwargs else kwargs["dilation"]
-        padding_amount = _symmetric_pad_width(kernel_size, dilation)
-
-        padding_layer = None
-        if padding_amount > 0:
-            padding_layer = make_hpx_padding_layer(
-                padding=padding_amount,
-                hpx_padding_mode=hpx_padding_mode,
-                enable_nhwc=enable_nhwc,
-                nside=nside,
+        if "enable_healpixpad" in kwargs and kwargs["enable_healpixpad"]:
+            raise NotImplementedError(
+                "HEALPixPaddingv2 is not available in this environment"
             )
 
-        if padding_layer is not None:
-            if compile_padding:
-                padding_layer = th.compile(padding_layer)
-            layers_list.append(padding_layer)
+        if "enable_healpixpad" in kwargs:
+            del kwargs["enable_healpixpad"]
 
-        if (
-            padding_amount > 0
-            and issubclass(layer, (nn.modules.conv._ConvNd, nn.modules.conv._ConvTransposeNd))
-        ):
-            kwargs["padding"] = 0
+        if not isinstance(layer, type) or not issubclass(layer, th.nn.Module):
+            raise TypeError(
+                f"Expected a subclass of torch.nn.Module, got {type(layer).__name__}"
+            )
+        # Define a HEALPixPadding layer if the given layer is a convolution layer
+        if layer.__bases__[0] is nn.modules.conv._ConvNd and kwargs["kernel_size"] > 1:
+            kwargs["padding"] = 0  # Disable native padding
+            kernel_size = 3 if "kernel_size" not in kwargs else kwargs["kernel_size"]
+            dilation = 1 if "dilation" not in kwargs else kwargs["dilation"]
+            padding = ((kernel_size - 1) // 2) * dilation
+            layers_list.append(HEALPixPadding(padding=padding, enable_nhwc=enable_nhwc))
 
         layers_list.append(layer(**kwargs))
         self.layers = nn.Sequential(*layers_list)

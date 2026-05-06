@@ -48,8 +48,8 @@ class UNetEncoderConfig:
     n_layers: List[int] = dataclasses.field(default_factory=lambda: [2, 2, 1])
     dilations: Optional[list] = None
     enable_nhwc: bool = False
-    enable_healpixpad: Optional[bool] = None
-    hpx_padding_mode: Optional[str] = "earth2grid"
+    enable_healpixpad: bool = False
+    hpx_padding_mode: Optional[str] = None
     nside: Optional[int] = None
     compile_padding: bool = False
 
@@ -87,8 +87,8 @@ class UNetEncoder(nn.Module):
         n_layers: Sequence = (2, 2, 1),
         dilations: Optional[list] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: Optional[bool] = None,
-        hpx_padding_mode: Optional[str] = "earth2grid",
+        enable_healpixpad: bool = False,
+        hpx_padding_mode: Optional[str] = None,
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -125,14 +125,11 @@ class UNetEncoder(nn.Module):
                 down_sampling_block.hpx_padding_mode = hpx_padding_mode
                 down_sampling_block.compile_padding = compile_padding
                 down_sampling_block.nside = face_nside
-                down_sampling_block.in_channels = old_channels
                 modules.append(
                     down_sampling_block.build()  # Shapes are not used in these calls.
                 )
                 if face_nside is not None:
-                    face_nside = (
-                        face_nside // down_sampling_block.downsample_spatial_factor()
-                    )
+                    face_nside = max(1, face_nside // 2)
 
             # Set up conv block
             conv_block.in_channels = old_channels
@@ -143,8 +140,8 @@ class UNetEncoder(nn.Module):
             conv_block.enable_nhwc = enable_nhwc
             conv_block.enable_healpixpad = enable_healpixpad
             conv_block.hpx_padding_mode = hpx_padding_mode
-            conv_block.nside = face_nside
             conv_block.compile_padding = compile_padding
+            conv_block.nside = face_nside
             modules.append(conv_block.build())  # Shapes are not used in these calls.
             old_channels = curr_channel
 

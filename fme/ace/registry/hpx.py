@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Optional
+from typing import Optional, Sequence
 
 import torch.nn as nn
 
@@ -43,8 +43,8 @@ class HEALPixRecUNetBuilder(ModuleConfig):
     enable_nhwc: bool = False
     enable_healpixpad: bool = False
     hpx_padding_mode: Optional[str] = None
-    nside: Optional[int] = None
     compile_padding: bool = False
+    nside: Optional[Sequence[int] | int] = None
 
     def build(
         self,
@@ -82,6 +82,6 @@ class HEALPixRecUNetBuilder(ModuleConfig):
             enable_nhwc=self.enable_nhwc,
             enable_healpixpad=self.enable_healpixpad,
             hpx_padding_mode=self.hpx_padding_mode,
-            nside=self.nside,
             compile_padding=self.compile_padding,
+            nside=self.nside,
         )
