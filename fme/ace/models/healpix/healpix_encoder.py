@@ -49,6 +49,9 @@ class UNetEncoderConfig:
     dilations: Optional[list] = None
     enable_nhwc: bool = False
     enable_healpixpad: bool = False
+    hpx_padding_mode: Optional[str] = None
+    nside: Optional[int] = None
+    compile_padding: bool = False
 
     def build(self) -> nn.Module:
         """
@@ -66,6 +69,9 @@ class UNetEncoderConfig:
             dilations=self.dilations,
             enable_nhwc=self.enable_nhwc,
             enable_healpixpad=self.enable_healpixpad,
+            hpx_padding_mode=self.hpx_padding_mode,
+            nside=self.nside,
+            compile_padding=self.compile_padding,
         )
 
 
@@ -82,6 +88,9 @@ class UNetEncoder(nn.Module):
         dilations: Optional[list] = None,
         enable_nhwc: bool = False,
         enable_healpixpad: bool = False,
+        hpx_padding_mode: Optional[str] = None,
+        nside: Optional[int] = None,
+        compile_padding: bool = False,
     ):
         """
         Args:
@@ -104,14 +113,23 @@ class UNetEncoder(nn.Module):
         # Build encoder
         old_channels = input_channels
         self.encoder = []
+        face_nside = nside
         for n, curr_channel in enumerate(n_channels):
             modules = list()
             if n > 0:
                 down_sampling_block.enable_nhwc = enable_nhwc
                 down_sampling_block.enable_healpixpad = enable_healpixpad
+                down_sampling_block.hpx_padding_mode = hpx_padding_mode
+                down_sampling_block.compile_padding = compile_padding
+                down_sampling_block.nside = face_nside
+                down_sampling_block.in_channels = old_channels
                 modules.append(
                     down_sampling_block.build()  # Shapes are not used in these calls.
                 )
+                if face_nside is not None:
+                    face_nside = (
+                        face_nside // down_sampling_block.downsample_spatial_factor()
+                    )
 
             # Set up conv block
             conv_block.in_channels = old_channels
@@ -121,6 +139,9 @@ class UNetEncoder(nn.Module):
             conv_block.n_layers = n_layers[n]
             conv_block.enable_nhwc = enable_nhwc
             conv_block.enable_healpixpad = enable_healpixpad
+            conv_block.hpx_padding_mode = hpx_padding_mode
+            conv_block.nside = face_nside
+            conv_block.compile_padding = compile_padding
             modules.append(conv_block.build())  # Shapes are not used in these calls.
             old_channels = curr_channel
 

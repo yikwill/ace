@@ -52,6 +52,9 @@ class UNetDecoderConfig:
     dilations: Optional[list] = None
     enable_nhwc: bool = False
     enable_healpixpad: bool = False
+    hpx_padding_mode: Optional[str] = None
+    nside: Optional[int] = None
+    compile_padding: bool = False
 
     def build(self) -> nn.Module:
         """
@@ -71,6 +74,9 @@ class UNetDecoderConfig:
             dilations=self.dilations,
             enable_nhwc=self.enable_nhwc,
             enable_healpixpad=self.enable_healpixpad,
+            hpx_padding_mode=self.hpx_padding_mode,
+            nside=self.nside,
+            compile_padding=self.compile_padding,
         )
 
 
@@ -89,6 +95,9 @@ class UNetDecoder(nn.Module):
         dilations: Optional[list] = None,
         enable_nhwc: bool = False,
         enable_healpixpad: bool = False,
+        hpx_padding_mode: Optional[str] = None,
+        nside: Optional[int] = None,
+        compile_padding: bool = False,
     ):
         """
         Initialize the UNetDecoder.
@@ -112,6 +121,7 @@ class UNetDecoder(nn.Module):
             dilations = [1 for _ in range(len(n_channels))]
 
         self.decoder = []
+        n_levels = len(n_channels)
         for n, curr_channel in enumerate(n_channels):
             up_sample_module = None
             if n != 0:
@@ -119,6 +129,12 @@ class UNetDecoder(nn.Module):
                 up_sampling_block.out_channels = curr_channel
                 up_sampling_block.enable_nhwc = enable_nhwc
                 up_sampling_block.enable_healpixpad = enable_healpixpad
+                up_sampling_block.hpx_padding_mode = hpx_padding_mode
+                up_sampling_block.compile_padding = compile_padding
+                if nside is not None:
+                    up_sampling_block.nside = nside // (2 ** (n_levels - n))
+                else:
+                    up_sampling_block.nside = None
                 up_sample_module = up_sampling_block.build()
 
             next_channel = (
@@ -132,12 +148,21 @@ class UNetDecoder(nn.Module):
             conv_block.n_layers = n_layers[n]
             conv_block.enable_nhwc = enable_nhwc
             conv_block.enable_healpixpad = enable_healpixpad
+            conv_block.hpx_padding_mode = hpx_padding_mode
+            conv_block.compile_padding = compile_padding
+            if nside is not None:
+                conv_block.nside = nside // (2 ** (n_levels - 1 - n))
+            else:
+                conv_block.nside = None
             conv_module = conv_block.build()
 
             rec_module = None
             if recurrent_block is not None:
                 recurrent_block.in_channels = next_channel
                 recurrent_block.enable_healpixpad = enable_healpixpad
+                recurrent_block.hpx_padding_mode = hpx_padding_mode
+                recurrent_block.compile_padding = compile_padding
+                recurrent_block.nside = conv_block.nside
                 rec_module = recurrent_block.build()
 
             self.decoder.append(
@@ -157,6 +182,9 @@ class UNetDecoder(nn.Module):
         output_layer.dilation = dilations[-1]
         output_layer.enable_nhwc = enable_nhwc
         output_layer.enable_healpixpad = enable_healpixpad
+        output_layer.hpx_padding_mode = hpx_padding_mode
+        output_layer.compile_padding = compile_padding
+        output_layer.nside = nside
 
         self.output_layer = output_layer.build()
 

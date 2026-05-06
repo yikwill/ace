@@ -34,6 +34,9 @@ DROP_VARIABLES = (
         "mask_sea_ice_volume",
         "mask_sea_ice_fraction",
         "mask_ocean_sea_ice_fraction",
+        "land_fraction",
+        "ocean_fraction",
+        "sea_ice_fraction",
     ]
     + [f"ak_{i}" for i in range(9)]
     + [f"bk_{i}" for i in range(9)]
@@ -46,9 +49,10 @@ DIMS = {
     "E3SMV2": ["time", "lat", "lon"],
     "ERA5": ["time", "latitude", "longitude"],
     "CM4": ["time", "lat", "lon"],
+    "HPX": ["time", "face", "height", "width"],
 }
 
-ClimateDataType = Literal["FV3GFS", "E3SMV2", "ERA5", "CM4"]
+ClimateDataType = Literal["FV3GFS", "E3SMV2", "ERA5", "CM4", "HPX"]
 
 
 def add_history_attrs(ds, input_zarr, start_date, end_date, n_samples):

@@ -1,4 +1,5 @@
 import dataclasses
+from typing import Optional
 
 import torch.nn as nn
 
@@ -41,6 +42,9 @@ class HEALPixRecUNetBuilder(ModuleConfig):
     prognostic_variables: int = 7
     enable_nhwc: bool = False
     enable_healpixpad: bool = False
+    hpx_padding_mode: Optional[str] = None
+    nside: Optional[int] = None
+    compile_padding: bool = False
 
     def build(
         self,
@@ -77,4 +81,7 @@ class HEALPixRecUNetBuilder(ModuleConfig):
             presteps=self.presteps,
             enable_nhwc=self.enable_nhwc,
             enable_healpixpad=self.enable_healpixpad,
+            hpx_padding_mode=self.hpx_padding_mode,
+            nside=self.nside,
+            compile_padding=self.compile_padding,
         )

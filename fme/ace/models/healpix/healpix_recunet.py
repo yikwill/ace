@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Sequence
+from typing import Optional, Sequence
 
 import pandas as pd
 import torch as th
@@ -46,6 +46,9 @@ class HEALPixRecUNet(nn.Module):
         enable_nhwc: bool = False,
         enable_healpixpad: bool = False,
         couplings: list = [],
+        hpx_padding_mode: Optional[str] = None,
+        nside: Optional[int] = None,
+        compile_padding: bool = False,
     ):
         """
         Initialize the HEALPixRecUNet model.
@@ -141,12 +144,18 @@ class HEALPixRecUNet(nn.Module):
         encoder.input_channels = self._compute_input_channels()
         encoder.enable_nhwc = self.enable_nhwc
         encoder.enable_healpixpad = self.enable_healpixpad
+        encoder.hpx_padding_mode = hpx_padding_mode
+        encoder.nside = nside
+        encoder.compile_padding = compile_padding
         self.encoder = encoder.build()
 
         self.encoder_depth = len(self.encoder.n_channels)
         decoder.output_channels = self._compute_output_channels()
         decoder.enable_nhwc = self.enable_nhwc
         decoder.enable_healpixpad = self.enable_healpixpad
+        decoder.hpx_padding_mode = hpx_padding_mode
+        decoder.nside = nside
+        decoder.compile_padding = compile_padding
         self.decoder = decoder.build()
 
     @property

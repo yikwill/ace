@@ -5,15 +5,22 @@ import logging
 import numpy as np
 import pytest
 import torch as th
+import torch.nn as nn
 
 from fme.ace.models.healpix.healpix_activations import (
     CappedGELUConfig,
     DownsamplingBlockConfig,
 )
-from fme.ace.models.healpix.healpix_blocks import ConvBlockConfig, RecurrentBlockConfig
+from fme.ace.models.healpix.healpix_blocks import (
+    ConvBlockConfig,
+    DealiasedDownsample,
+    RecurrentBlockConfig,
+    SmoothedInterpolateConv,
+)
 from fme.ace.models.healpix.healpix_decoder import UNetDecoder
 from fme.ace.models.healpix.healpix_encoder import UNetEncoder
-from fme.ace.models.healpix.healpix_layers import HEALPixPadding
+from fme.ace.models.healpix.healpix_layers import HEALPixLayer, HEALPixPadding, have_earth2grid
+from fme.ace.models.healpix.healpix_paddings import make_hpx_padding_layer
 from fme.ace.models.healpix.healpix_recunet import HEALPixRecUNet
 from fme.ace.registry.hpx import UNetDecoderConfig, UNetEncoderConfig
 from fme.ace.stepper import StepperConfig
@@ -983,3 +990,292 @@ def test_healpix_padding_forward(healpix_padding, mock_data):
         assert (
             data_region == original_data
         ).all(), f"Data region on face {face_idx} has been altered."
+
+
+# --- HEALPix padding modes + dealias / smoothed blocks ---
+
+
+def _folded_padding_dealias(
+    batch: int = 2, channels: int = 3, h: int = 16, device=None, dtype=th.float32
+):
+    if device is None:
+        device = th.device("cpu")
+    return th.randn(batch * 12, channels, h, h, device=device, dtype=dtype)
+
+
+@pytest.mark.parametrize("mode", ["karlbauer", "isolatitude"])
+def test_healpix_layer_conv_same_geometry(mode):
+    h = 16
+    x = _folded_padding_dealias(h=h)
+    kwargs = dict(
+        layer=nn.Conv2d,
+        in_channels=3,
+        out_channels=3,
+        kernel_size=3,
+        stride=1,
+        padding="same",
+        enable_nhwc=False,
+        hpx_padding_mode=mode,
+    )
+    if mode == "isolatitude":
+        kwargs["nside"] = h
+    layer = HEALPixLayer(**kwargs)
+    y = layer(x)
+    assert y.shape == x.shape
+    assert th.isfinite(y).all()
+
+
+@pytest.mark.skipif(not th.cuda.is_available(), reason="earth2grid requires CUDA")
+@pytest.mark.skipif(not have_earth2grid, reason="earth2grid not installed")
+def test_healpix_layer_earth2grid():
+    h = 16
+    x = _folded_padding_dealias(h=h, device=th.device("cuda"))
+    layer = HEALPixLayer(
+        nn.Conv2d,
+        in_channels=3,
+        out_channels=3,
+        kernel_size=3,
+        stride=1,
+        padding="same",
+        hpx_padding_mode="earth2grid",
+    ).cuda()
+    y = layer(x)
+    assert y.shape == x.shape
+    assert th.isfinite(y).all()
+
+
+def test_make_hpx_padding_factory_types():
+    p = make_hpx_padding_layer(1, "karlbauer", enable_nhwc=False)
+    assert p is not None
+    p2 = make_hpx_padding_layer(1, "isolatitude", enable_nhwc=False, nside=8)
+    assert p2 is not None
+
+
+def test_isolatitude_compile_padding_close():
+    """Compiled vs eager isolatitude padding must match (same module weights)."""
+    h = 16
+    x = _folded_padding_dealias(h=h)
+    pad_eager = make_hpx_padding_layer(1, "isolatitude", enable_nhwc=False, nside=h)
+    pad_compiled = th.compile(
+        make_hpx_padding_layer(1, "isolatitude", enable_nhwc=False, nside=h)
+    )
+    y0 = pad_eager(x)
+    y1 = pad_compiled(x)
+    assert y0.shape == y1.shape
+    assert th.isfinite(y1).all()
+    assert th.allclose(y0, y1, atol=1e-5, rtol=1e-4)
+
+
+@pytest.mark.parametrize("mode", ["karlbauer", "isolatitude"])
+def test_dealiased_downsample_forward(mode):
+    h = 16
+    x = _folded_padding_dealias(h=h)
+    kwargs = dict(
+        in_channels=3,
+        stride=2,
+        hpx_padding_mode=mode,
+    )
+    if mode == "isolatitude":
+        kwargs["nside"] = h
+    m = DealiasedDownsample(**kwargs)
+    y = m(x)
+    assert y.shape[-2:] == (h // 2, h // 2)
+
+
+@pytest.mark.parametrize("mode", ["karlbauer", "isolatitude"])
+def test_smoothed_interpolate_conv_forward(mode):
+    h = 16
+    x = _folded_padding_dealias(h=h)
+    kwargs = dict(
+        in_channels=3,
+        out_channels=5,
+        kernel_size=3,
+        scale_factor=2,
+        mode="nearest",
+        hpx_padding_mode=mode,
+    )
+    if mode == "isolatitude":
+        kwargs["nside"] = h
+    m = SmoothedInterpolateConv(**kwargs)
+    y = m(x)
+    assert y.shape[-2:] == (h * 2, h * 2)
+    assert y.shape[1] == 5
+
+
+def _minimal_hpx_configs_padding_dealias(img: int = 16):
+    enc_conv = ConvBlockConfig(
+        block_type="ConvNeXtBlock",
+        latent_channels=4,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    )
+    down = DownsamplingBlockConfig(
+        block_type="AvgPool",
+        pooling=2,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    )
+    enc = UNetEncoderConfig(
+        conv_block=enc_conv,
+        down_sampling_block=down,
+        input_channels=3,
+        n_channels=[8, 16],
+        n_layers=[1, 1],
+        nside=img,
+        hpx_padding_mode="karlbauer",
+    )
+    dec_conv = ConvBlockConfig(
+        block_type="ConvNeXtBlock",
+        latent_channels=4,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    )
+    dec = UNetDecoderConfig(
+        conv_block=dec_conv,
+        up_sampling_block=ConvBlockConfig(
+            block_type="TransposedConvUpsample",
+            stride=2,
+            hpx_padding_mode="karlbauer",
+            nside=img // 2,
+        ),
+        output_layer=ConvBlockConfig(
+            block_type="BasicConvBlock",
+            n_layers=1,
+            kernel_size=1,
+            out_channels=4,
+            hpx_padding_mode="karlbauer",
+            nside=img,
+        ),
+        recurrent_block=RecurrentBlockConfig(
+            hpx_padding_mode="karlbauer",
+            nside=img // 2,
+        ),
+        n_channels=[16, 8],
+        n_layers=[1, 1],
+        output_channels=4,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    )
+    return enc, dec
+
+
+@pytest.mark.parametrize("mode", ["karlbauer", "isolatitude"])
+def test_healpix_recunet_forward_padding_mode(mode):
+    img = 16
+    enc, dec = _minimal_hpx_configs_padding_dealias(img)
+    enc.hpx_padding_mode = mode
+    enc.nside = img
+    dec.hpx_padding_mode = mode
+    dec.nside = img
+    enc.conv_block.hpx_padding_mode = mode
+    enc.conv_block.nside = img
+    enc.down_sampling_block.hpx_padding_mode = mode
+    enc.down_sampling_block.nside = img
+    dec.conv_block.hpx_padding_mode = mode
+    dec.conv_block.nside = img
+    dec.up_sampling_block.hpx_padding_mode = mode
+    dec.output_layer.hpx_padding_mode = mode
+    dec.recurrent_block.hpx_padding_mode = mode
+    if mode == "isolatitude":
+        dec.up_sampling_block.nside = img // 2
+        dec.conv_block.nside = img // 2
+        dec.output_layer.nside = img
+        dec.recurrent_block.nside = img // 2
+
+    device = th.device("cuda" if th.cuda.is_available() else "cpu")
+    m = HEALPixRecUNet(
+        encoder=enc,
+        decoder=dec,
+        input_channels=3,
+        output_channels=4,
+        prognostic_variables=3,
+        n_constants=1,
+        decoder_input_channels=1,
+        input_time_size=2,
+        output_time_size=2,
+        enable_healpixpad=False,
+        hpx_padding_mode=mode,
+        nside=img,
+    ).to(device)
+
+    b = 2
+    x = th.randn(b, 12, 2 * 3, img, img, device=device)
+    dec_in = th.randn(b, 12, 2, img, img, device=device)
+    const = th.randn(b, 12, 1, img, img, device=device)
+    inp = th.cat([x, dec_in, const], dim=2)
+    out = m(inp)
+    assert out.shape[0] == b
+    assert th.isfinite(out).all()
+
+
+def test_healpix_recunet_dealias_smoothed():
+    img = 16
+    conv = ConvBlockConfig(
+        block_type="ConvNeXtBlock",
+        latent_channels=4,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    )
+    down = DownsamplingBlockConfig(
+        block_type="DealiasedDownsample",
+        dealias_stride=2,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    )
+    enc = UNetEncoderConfig(
+        conv_block=conv,
+        down_sampling_block=down,
+        input_channels=3,
+        n_channels=[8, 16],
+        n_layers=[1, 1],
+        nside=img,
+        hpx_padding_mode="karlbauer",
+    )
+    up = ConvBlockConfig(
+        block_type="SmoothedInterpolateConv",
+        stride=2,
+        upsample_mode="nearest",
+        hpx_padding_mode="karlbauer",
+        nside=img // 2,
+    )
+    dec = UNetDecoderConfig(
+        conv_block=conv,
+        up_sampling_block=up,
+        output_layer=ConvBlockConfig(
+            block_type="BasicConvBlock",
+            n_layers=1,
+            kernel_size=1,
+            out_channels=4,
+            hpx_padding_mode="karlbauer",
+            nside=img,
+        ),
+        recurrent_block=None,
+        n_channels=[16, 8],
+        n_layers=[1, 1],
+        output_channels=4,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    )
+    device = th.device("cuda" if th.cuda.is_available() else "cpu")
+    m = HEALPixRecUNet(
+        encoder=enc,
+        decoder=dec,
+        input_channels=3,
+        output_channels=4,
+        prognostic_variables=3,
+        n_constants=1,
+        decoder_input_channels=1,
+        input_time_size=2,
+        output_time_size=2,
+        enable_healpixpad=False,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    ).to(device)
+    b = 2
+    x = th.randn(b, 12, 2 * 3, img, img, device=device)
+    dec_in = th.randn(b, 12, 2, img, img, device=device)
+    const = th.randn(b, 12, 1, img, img, device=device)
+    inp = th.cat([x, dec_in, const], dim=2)
+    out = m(inp)
+    assert out.shape[0] == b
+    assert th.isfinite(out).all()
