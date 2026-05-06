@@ -37,8 +37,8 @@ class MaxPool(nn.Module):
         self,
         pooling: int = 2,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -47,12 +47,14 @@ class MaxPool(nn.Module):
             pooling (int, optional): Pooling kernel size passed to geometry layer.
             enable_nhwc (bool, optional): Enable nhwc format, passed to wrapper.
             enable_healpixpad (bool, optional): If HEALPixPadding should be enabled, passed to wrapper.
+            hpx_padding_mode (Optional[str], optional): HEALPix padding backend. Default
+                ``"earth2grid"``; also supports ``"karlbauer"`` and ``"isolatitude"``.
         """
         super().__init__()
         hpk: dict = {"enable_nhwc": enable_nhwc}
         if hpx_padding_mode is not None:
             hpk["hpx_padding_mode"] = hpx_padding_mode
-        else:
+        if enable_healpixpad is not None:
             hpk["enable_healpixpad"] = enable_healpixpad
         if nside is not None:
             hpk["nside"] = nside
@@ -87,8 +89,8 @@ class AvgPool(nn.Module):
         self,
         pooling: int = 2,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -97,12 +99,14 @@ class AvgPool(nn.Module):
             pooling (int, optional): Pooling kernel size passed to geometry layer.
             enable_nhwc (bool, optional): Enable nhwc format, passed to wrapper.
             enable_healpixpad (bool, optional): If HEALPixPadding should be enabled, passed to wrapper.
+            hpx_padding_mode (Optional[str], optional): HEALPix padding backend. Default
+                ``"earth2grid"``; also supports ``"karlbauer"`` and ``"isolatitude"``.
         """
         super().__init__()
         hpk: dict = {"enable_nhwc": enable_nhwc}
         if hpx_padding_mode is not None:
             hpk["hpx_padding_mode"] = hpx_padding_mode
-        else:
+        if enable_healpixpad is not None:
             hpk["enable_healpixpad"] = enable_healpixpad
         if nside is not None:
             hpk["nside"] = nside
@@ -137,14 +141,15 @@ class DownsamplingBlockConfig:
         pooling: Pooling size
         enable_nhwc: Flag to enable NHWC data format, default is False.
         enable_healpixpad: Flag to enable HEALPix padding, default is False.
+        hpx_padding_mode: HEALPix padding backend, default is "earth2grid".
 
     """
 
     block_type: Literal["MaxPool", "AvgPool", "DealiasedDownsample"]
     pooling: int = 2
     enable_nhwc: bool = False
-    enable_healpixpad: bool = False
-    hpx_padding_mode: Optional[str] = None
+    enable_healpixpad: Optional[bool] = None
+    hpx_padding_mode: Optional[str] = "earth2grid"
     nside: Optional[int] = None
     compile_padding: bool = False
     in_channels: Optional[int] = None
@@ -258,7 +263,7 @@ class CappedGELUConfig:
 
     cap_value: int = 10
     enable_nhwc: bool = False
-    enable_healpixpad: bool = False
+    enable_healpixpad: Optional[bool] = None
 
     def build(self) -> nn.Module:
         """

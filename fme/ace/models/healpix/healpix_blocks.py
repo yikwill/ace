@@ -28,15 +28,16 @@ from .healpix_layers import HEALPixLayer
 
 def _healpix_layer_kwargs(
     enable_nhwc: bool,
-    enable_healpixpad: bool,
-    hpx_padding_mode: Optional[str] = None,
+    enable_healpixpad: Optional[bool],
+    hpx_padding_mode: Optional[str] = "earth2grid",
     nside: Optional[int] = None,
     compile_padding: bool = False,
 ) -> dict:
+    """Build keyword arguments passed to ``HEALPixLayer``."""
     out: dict = {"enable_nhwc": enable_nhwc}
     if hpx_padding_mode is not None:
         out["hpx_padding_mode"] = hpx_padding_mode
-    else:
+    if enable_healpixpad is not None:
         out["enable_healpixpad"] = enable_healpixpad
     if nside is not None:
         out["nside"] = nside
@@ -58,6 +59,7 @@ class RecurrentBlockConfig:
         kernel_size: Size of the kernel, default is 1.
         enable_nhwc: Flag to enable NHWC data format, default is False.
         enable_healpixpad: Flag to enable HEALPix padding, default is False.
+        hpx_padding_mode: HEALPix padding backend, default is "earth2grid".
         block_type: Type of recurrent block, either "ConvGRUBlock" or "ConvLSTMBlock",
         default is "ConvGRUBlock".
     """
@@ -65,8 +67,8 @@ class RecurrentBlockConfig:
     in_channels: int = 3
     kernel_size: int = 1
     enable_nhwc: bool = False
-    enable_healpixpad: bool = False
-    hpx_padding_mode: Optional[str] = None
+    enable_healpixpad: Optional[bool] = None
+    hpx_padding_mode: Optional[str] = "earth2grid"
     nside: Optional[int] = None
     compile_padding: bool = False
     block_type: Literal["ConvGRUBlock", "ConvLSTMBlock"] = "ConvGRUBlock"
@@ -120,6 +122,7 @@ class ConvBlockConfig:
         activation: Activation configuration, default is None.
         enable_nhwc: Flag to enable NHWC data format, default is False.
         enable_healpixpad: Flag to enable HEALPix padding, default is False.
+        hpx_padding_mode: HEALPix padding backend, default is "earth2grid".
         block_type: Type of block, default is "BasicConvBlock".
     """
 
@@ -134,8 +137,8 @@ class ConvBlockConfig:
     upsampling: Optional[UpsamplingBlockConfig] = None
     activation: Optional[CappedGELUConfig] = None
     enable_nhwc: bool = False
-    enable_healpixpad: bool = False
-    hpx_padding_mode: Optional[str] = None
+    enable_healpixpad: Optional[bool] = None
+    hpx_padding_mode: Optional[str] = "earth2grid"
     nside: Optional[int] = None
     compile_padding: bool = False
     upsample_mode: str = "nearest"
@@ -143,6 +146,7 @@ class ConvBlockConfig:
         "BasicConvBlock",
         "ConvNeXtBlock",
         "SymmetricConvNeXtBlock",
+        "Multi_SymmetricConvNeXtBlock",
         "ConvThenUpsample",
         "TransposedConvUpsample",
         "SmoothedInterpolateConv",
@@ -197,6 +201,24 @@ class ConvBlockConfig:
                 kernel_size=self.kernel_size,
                 dilation=self.dilation,
                 upscale_factor=self.upscale_factor,
+                activation=self.activation,
+                enable_nhwc=self.enable_nhwc,
+                enable_healpixpad=self.enable_healpixpad,
+                hpx_padding_mode=self.hpx_padding_mode,
+                nside=self.nside,
+                compile_padding=self.compile_padding,
+            )
+        elif self.block_type == "Multi_SymmetricConvNeXtBlock":
+            if self.latent_channels is None:
+                self.latent_channels = 1
+            return Multi_SymmetricConvNeXtBlock(
+                in_channels=self.in_channels,
+                latent_channels=cast(int, self.latent_channels),
+                out_channels=self.out_channels,
+                kernel_size=self.kernel_size,
+                dilation=self.dilation,
+                upscale_factor=self.upscale_factor,
+                n_layers=self.n_layers,
                 activation=self.activation,
                 enable_nhwc=self.enable_nhwc,
                 enable_healpixpad=self.enable_healpixpad,
@@ -260,8 +282,8 @@ class ConvGRUBlock(nn.Module):
         in_channels=3,
         kernel_size=1,
         enable_nhwc=False,
-        enable_healpixpad=False,
-        hpx_padding_mode=None,
+        enable_healpixpad=None,
+        hpx_padding_mode="earth2grid",
         nside=None,
         compile_padding=False,
     ):
@@ -271,6 +293,7 @@ class ConvGRUBlock(nn.Module):
             kernel_size: Size of the convolutional kernel.
             enable_nhwc: Enable nhwc format, passed to wrapper.
             enable_healpixpad: If HEALPixPadding should be enabled, passed to wrapper.
+            hpx_padding_mode: HEALPix padding backend passed to wrapper.
         """
         super().__init__()
 
@@ -353,8 +376,8 @@ class ConvLSTMBlock(nn.Module):
         dilation: int = 1,
         activation: nn.Module = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -372,6 +395,7 @@ class ConvLSTMBlock(nn.Module):
             activation: Activation function.
             enable_nhwc: Enable nhwc format.
             enable_healpixpad: If HEALPixPadding should be enabled.
+            hpx_padding_mode: HEALPix padding backend passed to wrapper.
         """
         super().__init__()
         _hp = lambda: _healpix_layer_kwargs(
@@ -490,8 +514,8 @@ class BasicConvBlock(nn.Module):
         latent_channels=None,
         activation=None,
         enable_nhwc=False,
-        enable_healpixpad=False,
-        hpx_padding_mode=None,
+        enable_healpixpad=None,
+        hpx_padding_mode="earth2grid",
         nside=None,
         compile_padding=False,
     ):
@@ -506,6 +530,7 @@ class BasicConvBlock(nn.Module):
             activation: ModuleConfig for activation function to use.
             enable_nhwc: Enable nhwc format, passed to wrapper.
             enable_healpixpad:: If HEALPixPadding should be enabled, passed to wrapper.
+            hpx_padding_mode: HEALPix padding backend passed to wrapper.
         """
         super().__init__()
         if latent_channels is None:
@@ -566,8 +591,8 @@ class ConvNeXtBlock(nn.Module):
         upscale_factor: int = 4,
         activation: Optional[CappedGELUConfig] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -584,6 +609,7 @@ class ConvNeXtBlock(nn.Module):
             activation: Configuration for the activation function used between layers.
             enable_nhwc: Whether to enable NHWC format.
             enable_healpixpad: Whether to enable HEALPixPadding.
+            hpx_padding_mode: HEALPix padding backend passed to wrapper.
         """
         super().__init__()
         _hp = lambda: _healpix_layer_kwargs(
@@ -677,8 +703,8 @@ class DoubleConvNeXtBlock(nn.Module):
         latent_channels: int = 1,
         activation: Optional[CappedGELUConfig] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -695,6 +721,7 @@ class DoubleConvNeXtBlock(nn.Module):
             activation: Configuration for the activation function used between layers (default is None).
             enable_nhwc: Whether to enable NHWC format (default is False).
             enable_healpixpad: Whether to enable HEALPixPadding (default is False).
+            hpx_padding_mode: HEALPix padding backend passed to wrapper.
         """
         super().__init__()
         _hp = lambda: _healpix_layer_kwargs(
@@ -849,8 +876,8 @@ class SymmetricConvNeXtBlock(nn.Module):
         upscale_factor: int = 4,
         activation: Optional[CappedGELUConfig] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -867,6 +894,7 @@ class SymmetricConvNeXtBlock(nn.Module):
             activation: Configuration for the activation function used between layers (default is None).
             enable_nhwc: Whether to enable NHWC format (default is False).
             enable_healpixpad: Whether to enable HEALPixPadding (default is False).
+            hpx_padding_mode: HEALPix padding backend passed to wrapper.
         """
         super().__init__()
         _hp = lambda: _healpix_layer_kwargs(
@@ -954,6 +982,53 @@ class SymmetricConvNeXtBlock(nn.Module):
         return self.skip_module(x) + self.convblock(x)
 
 
+class Multi_SymmetricConvNeXtBlock(nn.Module):
+    """Serial wrapper of ``SymmetricConvNeXtBlock`` repeated ``n_layers`` times."""
+
+    def __init__(
+        self,
+        in_channels: int = 3,
+        latent_channels: int = 1,
+        out_channels: int = 1,
+        kernel_size: int = 3,
+        dilation: int = 1,
+        upscale_factor: int = 4,
+        n_layers: int = 1,
+        activation: Optional[CappedGELUConfig] = None,
+        enable_nhwc: bool = False,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
+        nside: Optional[int] = None,
+        compile_padding: bool = False,
+    ):
+        super().__init__()
+        self.blocks = nn.ModuleList()
+        for i in range(n_layers):
+            curr_in_channels = in_channels if i == 0 else out_channels
+            self.blocks.append(
+                SymmetricConvNeXtBlock(
+                    in_channels=curr_in_channels,
+                    latent_channels=latent_channels,
+                    out_channels=out_channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    upscale_factor=upscale_factor,
+                    activation=activation,
+                    enable_nhwc=enable_nhwc,
+                    enable_healpixpad=enable_healpixpad,
+                    hpx_padding_mode=hpx_padding_mode,
+                    nside=nside,
+                    compile_padding=compile_padding,
+                )
+            )
+
+    def forward(self, x):
+        out = x
+        for block in self.blocks:
+            out = block(out)
+        return out
+
+
 class ConvThenUpsample(nn.Module):
     """Wrapper for upsampling and then applying a convolution using HEALPix or other tensor data.
     Allows more control over the type of upsampling (smooth with bilinear or pixelated
@@ -970,8 +1045,8 @@ class ConvThenUpsample(nn.Module):
         upsampling: Optional[UpsamplingBlockConfig] = None,
         activation: Optional[CappedGELUConfig] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -1025,8 +1100,8 @@ class TransposedConvUpsample(nn.Module):
         upsampling: int = 2,
         activation: Optional[CappedGELUConfig] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -1038,6 +1113,7 @@ class TransposedConvUpsample(nn.Module):
             activation: ModuleConfig for the activation function used in upsampling.
             enable_nhwc: Enable nhwc format, passed to wrapper.
             enable_healpixpad: If HEALPixPadding should be enabled, passed to wrapper.
+            hpx_padding_mode: HEALPix padding backend passed to wrapper.
         """
         super().__init__()
         upsampler = []
@@ -1179,8 +1255,8 @@ class DealiasedDownsample(nn.Module):
         resample_filter: Sequence[float] = (1.0, 2.0, 1.0),
         stride: int = 2,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -1239,8 +1315,8 @@ class SmoothedInterpolateConv(nn.Module):
         mode: str = "nearest",
         activation: Optional[nn.Module] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):

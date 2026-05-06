@@ -51,8 +51,8 @@ class UNetDecoderConfig:
     output_channels: int = 1
     dilations: Optional[list] = None
     enable_nhwc: bool = False
-    enable_healpixpad: bool = False
-    hpx_padding_mode: Optional[str] = None
+    enable_healpixpad: Optional[bool] = None
+    hpx_padding_mode: Optional[str] = "earth2grid"
     nside: Optional[int] = None
     compile_padding: bool = False
 
@@ -94,8 +94,8 @@ class UNetDecoder(nn.Module):
         output_channels: int = 1,
         dilations: Optional[list] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -113,9 +113,12 @@ class UNetDecoder(nn.Module):
             dilations: List of dilations to use for the convolutional blocks.
             enable_nhwc: If True, use channel last format.
             enable_healpixpad: If True, use the healpixpad library if installed.
+            hpx_padding_mode: HEALPix padding backend. Default ``"earth2grid"``;
+                also supports ``"karlbauer"`` and ``"isolatitude"``.
         """
         super().__init__()
         self.channel_dim = 1
+        self.hpx_padding_mode = hpx_padding_mode
 
         if dilations is None:
             dilations = [1 for _ in range(len(n_channels))]

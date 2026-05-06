@@ -1279,3 +1279,57 @@ def test_healpix_recunet_dealias_smoothed():
     out = m(inp)
     assert out.shape[0] == b
     assert th.isfinite(out).all()
+
+
+def test_multi_symmetric_convnext_block_forward():
+    cfg = ConvBlockConfig(
+        block_type="Multi_SymmetricConvNeXtBlock",
+        in_channels=3,
+        out_channels=5,
+        latent_channels=4,
+        kernel_size=3,
+        dilation=1,
+        upscale_factor=4,
+        n_layers=2,
+        hpx_padding_mode="karlbauer",
+        nside=16,
+    )
+    layer = cfg.build()
+    x = _folded_padding_dealias(channels=3, h=16)
+    y = layer(x)
+    assert y.shape == (x.shape[0], 5, 16, 16)
+    assert th.isfinite(y).all()
+
+
+def test_multi_symmetric_isolatitude_compile_and_smoothed_upsample():
+    img = 16
+    conv = ConvBlockConfig(
+        block_type="Multi_SymmetricConvNeXtBlock",
+        in_channels=3,
+        out_channels=3,
+        latent_channels=4,
+        n_layers=2,
+        hpx_padding_mode="isolatitude",
+        nside=img,
+        compile_padding=True,
+        activation=CappedGELUConfig(cap_value=10),
+    ).build()
+    x = _folded_padding_dealias(channels=3, h=img)
+    y = conv(x)
+    assert y.shape == x.shape
+    assert th.isfinite(y).all()
+
+    up = ConvBlockConfig(
+        block_type="SmoothedInterpolateConv",
+        in_channels=3,
+        out_channels=3,
+        stride=2,
+        upsample_mode="nearest",
+        activation=CappedGELUConfig(cap_value=10),
+        hpx_padding_mode="isolatitude",
+        nside=img,
+        compile_padding=True,
+    ).build()
+    y_up = up(x)
+    assert y_up.shape[-2:] == (img * 2, img * 2)
+    assert th.isfinite(y_up).all()

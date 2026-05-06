@@ -69,11 +69,21 @@ class HEALPixLayer(nn.Module):
     def __init__(
         self,
         layer,
-        hpx_padding_mode: str | None = None,
+        hpx_padding_mode: str | None = "earth2grid",
         nside: int | None = None,
         compile_padding: bool = False,
         **kwargs,
     ):
+        """
+        Args:
+            layer: Base ``torch.nn`` layer class to wrap (e.g. ``nn.Conv2d``).
+            hpx_padding_mode: HEALPix padding backend. ``"earth2grid"`` matches legacy
+                ``enable_healpixpad=True`` behavior; ``"karlbauer"`` and
+                ``"isolatitude"`` select pure-PyTorch implementations.
+            nside: Native face size, required for ``hpx_padding_mode="isolatitude"``.
+            compile_padding: If True, compile the HEALPix padding module.
+            **kwargs: Keyword args forwarded to ``layer`` and HEALPix wrapper options.
+        """
         super().__init__()
         layers_list: list[nn.Module] = []
 
@@ -81,6 +91,7 @@ class HEALPixLayer(nn.Module):
         hpx_padding_mode = warn_deprecated_enable_healpixpad(
             legacy_enable_healpixpad, hpx_padding_mode
         )
+        self.hpx_padding_mode = hpx_padding_mode
 
         if "nside" in kwargs:
             _ns = kwargs.pop("nside")

@@ -44,9 +44,9 @@ class HEALPixRecUNet(nn.Module):
         reset_cycle: str = "24h",
         presteps: int = 1,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
+        enable_healpixpad: Optional[bool] = None,
         couplings: list = [],
-        hpx_padding_mode: Optional[str] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -82,8 +82,11 @@ class HEALPixRecUNet(nn.Module):
                 Number of model steps to initialize recurrent states.
             enable_nhwc: bool, optional
                 Model with [N, H, W, C] instead of [N, C, H, W].
-            enable_healpixpad: bool, optional
+            enable_healpixpad: Optional[bool], optional
                 Enable CUDA HEALPixPadding if installed.
+            hpx_padding_mode: Optional[str], optional
+                HEALPix padding backend. Default ``"earth2grid"``; also supports
+                ``"karlbauer"`` and ``"isolatitude"``.
             couplings: list, optional
                 Sequence of dictionaries that describe coupling mechanisms. Currently unused in our production model;
                 but we want to keep this in the module definition, in case we bring our SST module
@@ -127,6 +130,7 @@ class HEALPixRecUNet(nn.Module):
         self.presteps = presteps
         self.enable_nhwc = enable_nhwc
         self.enable_healpixpad = enable_healpixpad
+        self.hpx_padding_mode = hpx_padding_mode
 
         # Number of passes through the model, or a diagnostic model with only one output time
         self.is_diagnostic = self.output_time_size == 1 and self.input_time_size > 1

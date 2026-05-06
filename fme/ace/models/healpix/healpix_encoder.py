@@ -48,8 +48,8 @@ class UNetEncoderConfig:
     n_layers: List[int] = dataclasses.field(default_factory=lambda: [2, 2, 1])
     dilations: Optional[list] = None
     enable_nhwc: bool = False
-    enable_healpixpad: bool = False
-    hpx_padding_mode: Optional[str] = None
+    enable_healpixpad: Optional[bool] = None
+    hpx_padding_mode: Optional[str] = "earth2grid"
     nside: Optional[int] = None
     compile_padding: bool = False
 
@@ -87,8 +87,8 @@ class UNetEncoder(nn.Module):
         n_layers: Sequence = (2, 2, 1),
         dilations: Optional[list] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
-        hpx_padding_mode: Optional[str] = None,
+        enable_healpixpad: Optional[bool] = None,
+        hpx_padding_mode: Optional[str] = "earth2grid",
         nside: Optional[int] = None,
         compile_padding: bool = False,
     ):
@@ -102,9 +102,12 @@ class UNetEncoder(nn.Module):
             dilations: list of dilations to use for the the convolutional blocks
             enable_nhwc: if channel last format should be used
             enable_healpixpad: if healpixpad library should be used (true if installed)
+            hpx_padding_mode: HEALPix padding backend. Default ``"earth2grid"``;
+                also supports ``"karlbauer"`` and ``"isolatitude"``.
         """
         super().__init__()
         self.n_channels = n_channels
+        self.hpx_padding_mode = hpx_padding_mode
 
         if dilations is None:
             # Defaults to [1, 1, 1...] in accordance with the number of unet levels
