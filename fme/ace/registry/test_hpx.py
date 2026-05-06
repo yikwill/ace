@@ -19,9 +19,19 @@ from fme.ace.models.healpix.healpix_blocks import (
 )
 from fme.ace.models.healpix.healpix_decoder import UNetDecoder
 from fme.ace.models.healpix.healpix_encoder import UNetEncoder
-from fme.ace.models.healpix.healpix_layers import HEALPixLayer, HEALPixPadding, have_earth2grid
-from fme.ace.models.healpix.healpix_paddings import make_hpx_padding_layer
+from fme.ace.models.healpix.healpix_layers import (
+    HEALPixLayer,
+    HEALPixPadding,
+    HEALPixPaddingIsolatitude,
+    HEALPixPaddingv2,
+    have_earth2grid,
+)
+from fme.ace.models.healpix.healpix_paddings import (
+    make_hpx_padding_layer,
+    warn_deprecated_enable_healpixpad,
+)
 from fme.ace.models.healpix.healpix_recunet import HEALPixRecUNet
+from fme.ace.models.healpix.healpix_unet import HEALPixUNet
 from fme.ace.registry.hpx import UNetDecoderConfig, UNetEncoderConfig
 from fme.ace.stepper import StepperConfig
 from fme.core.coordinates import HEALPixCoordinates, HybridSigmaPressureCoordinate
@@ -1051,6 +1061,37 @@ def test_make_hpx_padding_factory_types():
     assert p2 is not None
 
 
+def test_healpix_layer_uses_mode_selected_padding_class():
+    k_layer = HEALPixLayer(
+        nn.Conv2d,
+        in_channels=3,
+        out_channels=3,
+        kernel_size=3,
+        hpx_padding_mode="karlbauer",
+    )
+    assert isinstance(k_layer.layers[0], HEALPixPadding)
+
+    i_layer = HEALPixLayer(
+        nn.Conv2d,
+        in_channels=3,
+        out_channels=3,
+        kernel_size=3,
+        hpx_padding_mode="isolatitude",
+        nside=16,
+    )
+    assert isinstance(i_layer.layers[0], HEALPixPaddingIsolatitude)
+
+    if have_earth2grid and th.cuda.is_available():
+        e_layer = HEALPixLayer(
+            nn.Conv2d,
+            in_channels=3,
+            out_channels=3,
+            kernel_size=3,
+            hpx_padding_mode="earth2grid",
+        )
+        assert isinstance(e_layer.layers[0], HEALPixPaddingv2)
+
+
 def test_isolatitude_compile_padding_close():
     """Compiled vs eager isolatitude padding must match (same module weights)."""
     h = 16
@@ -1064,6 +1105,35 @@ def test_isolatitude_compile_padding_close():
     assert y0.shape == y1.shape
     assert th.isfinite(y1).all()
     assert th.allclose(y0, y1, atol=1e-5, rtol=1e-4)
+
+
+def test_warn_deprecated_enable_healpixpad_behavior(caplog):
+    """Explicit hpx_padding_mode must win without deprecation noise; legacy bool warns."""
+    caplog.set_level(logging.WARNING)
+
+    caplog.clear()
+    assert warn_deprecated_enable_healpixpad(False, "isolatitude") == "isolatitude"
+    assert not caplog.records
+
+    caplog.clear()
+    assert warn_deprecated_enable_healpixpad(True, "karlbauer") == "karlbauer"
+    assert not caplog.records
+
+    caplog.clear()
+    assert warn_deprecated_enable_healpixpad(None, None) == "earth2grid"
+    assert not caplog.records
+
+    caplog.clear()
+    assert warn_deprecated_enable_healpixpad(False, None) == "karlbauer"
+    assert any(
+        "enable_healpixpad is deprecated" in r.getMessage() for r in caplog.records
+    )
+
+    caplog.clear()
+    assert warn_deprecated_enable_healpixpad(True, None) == "earth2grid"
+    assert any(
+        "enable_healpixpad is deprecated" in r.getMessage() for r in caplog.records
+    )
 
 
 @pytest.mark.parametrize("mode", ["karlbauer", "isolatitude"])
@@ -1100,6 +1170,42 @@ def test_smoothed_interpolate_conv_forward(mode):
     y = m(x)
     assert y.shape[-2:] == (h * 2, h * 2)
     assert y.shape[1] == 5
+
+
+def test_dealiased_downsample_config_accepts_stride_alias():
+    cfg = DownsamplingBlockConfig(
+        block_type="DealiasedDownsample",
+        in_channels=3,
+        stride=4,
+        resample_filter=(1.0, 2.0, 1.0),
+    )
+    assert cfg.downsample_spatial_factor() == 4
+    module = cfg.build()
+    assert isinstance(module, DealiasedDownsample)
+
+
+def test_dealiased_downsample_config_accepts_list_filter():
+    cfg = DownsamplingBlockConfig(
+        block_type="DealiasedDownsample",
+        in_channels=3,
+        stride=2,
+        resample_filter=[1.0, 2.0, 1.0],
+    )
+    module = cfg.build()
+    assert isinstance(module, DealiasedDownsample)
+
+
+def test_smoothed_interpolate_conv_config_accepts_modulus_aliases():
+    cfg = ConvBlockConfig(
+        block_type="SmoothedInterpolateConv",
+        in_channels=3,
+        out_channels=5,
+        kernel_size=3,
+        scale_factor=2,
+        mode="nearest",
+    )
+    module = cfg.build()
+    assert isinstance(module, SmoothedInterpolateConv)
 
 
 def _minimal_hpx_configs_padding_dealias(img: int = 16):
@@ -1340,7 +1446,7 @@ def test_recunet_isolatitude_compile_padding_nside_sequence():
         block_type="ConvNeXtBlock",
         in_channels=3,
         out_channels=3,
-        latent_channels=8,
+        latent_channels=2,
         kernel_size=3,
         dilation=1,
         activation=CappedGELUConfig(cap_value=10),
@@ -1349,7 +1455,7 @@ def test_recunet_isolatitude_compile_padding_nside_sequence():
         conv_block=conv_cfg,
         down_sampling_block=DownsamplingBlockConfig(block_type="AvgPool", pooling=2),
         input_channels=5,
-        n_channels=[16, 32, 64],
+        n_channels=[8, 8, 8],
         n_layers=[1, 1, 1],
         dilations=[1, 1, 1],
     )
@@ -1358,7 +1464,7 @@ def test_recunet_isolatitude_compile_padding_nside_sequence():
             block_type="ConvNeXtBlock",
             in_channels=3,
             out_channels=3,
-            latent_channels=8,
+            latent_channels=2,
             kernel_size=3,
             dilation=1,
             activation=CappedGELUConfig(cap_value=10),
@@ -1378,7 +1484,7 @@ def test_recunet_isolatitude_compile_padding_nside_sequence():
             n_layers=1,
         ),
         recurrent_block=RecurrentBlockConfig(block_type="ConvGRUBlock", kernel_size=1),
-        n_channels=[64, 32, 16],
+        n_channels=[8, 8, 8],
         n_layers=[1, 1, 1],
         output_channels=4,
         dilations=[1, 1, 1],
@@ -1401,3 +1507,258 @@ def test_recunet_isolatitude_compile_padding_nside_sequence():
     y = model(x)
     assert y.shape == (1, 12, 4, 64, 64)
     assert th.isfinite(y).all()
+
+
+# pragma mark - HEALPixUNet
+
+
+def _hpx_unet_configs(
+    img: int = 16,
+    encoder_n_channels: list[int] | None = None,
+    decoder_n_channels: list[int] | None = None,
+    output_channels: int = 4,
+    padding_mode: str = "karlbauer",
+):
+    """Build minimal encoder/decoder configs for HEALPixUNet tests.
+
+    The decoder uses ``recurrent_block=None`` since HEALPixUNet is the
+    non-recurrent variant.
+    """
+    if encoder_n_channels is None:
+        encoder_n_channels = [8, 16]
+    if decoder_n_channels is None:
+        decoder_n_channels = list(reversed(encoder_n_channels))
+
+    enc_conv = ConvBlockConfig(
+        block_type="ConvNeXtBlock",
+        latent_channels=4,
+        hpx_padding_mode=padding_mode,
+        nside=img,
+    )
+    down = DownsamplingBlockConfig(
+        block_type="AvgPool",
+        pooling=2,
+        hpx_padding_mode=padding_mode,
+        nside=img,
+    )
+    enc = UNetEncoderConfig(
+        conv_block=enc_conv,
+        down_sampling_block=down,
+        input_channels=3,
+        n_channels=encoder_n_channels,
+        n_layers=[1] * len(encoder_n_channels),
+        nside=img,
+        hpx_padding_mode=padding_mode,
+    )
+    dec_conv = ConvBlockConfig(
+        block_type="ConvNeXtBlock",
+        latent_channels=4,
+        hpx_padding_mode=padding_mode,
+        nside=img,
+    )
+    dec = UNetDecoderConfig(
+        conv_block=dec_conv,
+        up_sampling_block=ConvBlockConfig(
+            block_type="TransposedConvUpsample",
+            stride=2,
+            hpx_padding_mode=padding_mode,
+            nside=img // 2,
+        ),
+        output_layer=ConvBlockConfig(
+            block_type="BasicConvBlock",
+            n_layers=1,
+            kernel_size=1,
+            out_channels=output_channels,
+            hpx_padding_mode=padding_mode,
+            nside=img,
+        ),
+        recurrent_block=None,
+        n_channels=decoder_n_channels,
+        n_layers=[1] * len(decoder_n_channels),
+        output_channels=output_channels,
+        hpx_padding_mode=padding_mode,
+        nside=img,
+    )
+    return enc, dec
+
+
+def test_HEALPixUNet_initialize():
+    img = 16
+    in_channels = 5
+    out_channels = 4
+    enc, dec = _hpx_unet_configs(img=img, output_channels=out_channels)
+    device = get_device()
+
+    model = HEALPixUNet(
+        encoder=enc,
+        decoder=dec,
+        input_channels=in_channels,
+        output_channels=out_channels,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    ).to(device)
+    assert isinstance(model, HEALPixUNet)
+    # confirm decoder has no recurrent submodules
+    for layer in model.decoder.decoder:
+        assert layer["recurrent"] is None
+
+
+def test_HEALPixUNet_rejects_recurrent_decoder():
+    img = 16
+    enc, dec = _hpx_unet_configs(img=img)
+    dec.recurrent_block = RecurrentBlockConfig(
+        block_type="ConvGRUBlock",
+        kernel_size=1,
+        hpx_padding_mode="karlbauer",
+        nside=img // 2,
+    )
+    with pytest.raises(ValueError, match="non-recurrent"):
+        HEALPixUNet(
+            encoder=enc,
+            decoder=dec,
+            input_channels=3,
+            output_channels=4,
+            hpx_padding_mode="karlbauer",
+            nside=img,
+        )
+
+
+def test_HEALPixUNet_forward_shape():
+    img = 16
+    in_channels = 5
+    out_channels = 4
+    batch = 2
+    enc, dec = _hpx_unet_configs(img=img, output_channels=out_channels)
+    device = get_device()
+
+    model = HEALPixUNet(
+        encoder=enc,
+        decoder=dec,
+        input_channels=in_channels,
+        output_channels=out_channels,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    ).to(device)
+
+    x = th.randn(batch, 12, in_channels, img, img, device=device)
+    y = model(x)
+    assert y.shape == (batch, 12, out_channels, img, img)
+    assert th.isfinite(y).all()
+
+
+def test_HEALPixUNet_input_channel_validation():
+    img = 16
+    in_channels = 5
+    out_channels = 4
+    enc, dec = _hpx_unet_configs(img=img, output_channels=out_channels)
+    device = get_device()
+
+    model = HEALPixUNet(
+        encoder=enc,
+        decoder=dec,
+        input_channels=in_channels,
+        output_channels=out_channels,
+        hpx_padding_mode="karlbauer",
+        nside=img,
+    ).to(device)
+
+    bad_input = th.randn(1, 12, in_channels + 1, img, img, device=device)
+    with pytest.raises(ValueError, match=f"Expected input to have {in_channels} channels"):
+        model(bad_input)
+
+    bad_ndim = th.randn(1, 12, in_channels, img, img, img, device=device)
+    with pytest.raises(ValueError, match="5D input"):
+        model(bad_ndim)
+
+
+@pytest.mark.parametrize("mode", ["karlbauer", "isolatitude"])
+def test_HEALPixUNet_forward_padding_mode(mode):
+    img = 16
+    in_channels = 5
+    out_channels = 4
+    batch = 2
+    enc, dec = _hpx_unet_configs(
+        img=img, output_channels=out_channels, padding_mode=mode
+    )
+    if mode == "isolatitude":
+        # decoder modules at the deeper level need the smaller nside
+        dec.up_sampling_block.nside = img // 2
+        dec.conv_block.nside = img // 2
+
+    device = th.device("cuda" if th.cuda.is_available() else "cpu")
+    model = HEALPixUNet(
+        encoder=enc,
+        decoder=dec,
+        input_channels=in_channels,
+        output_channels=out_channels,
+        hpx_padding_mode=mode,
+        nside=img,
+    ).to(device)
+
+    x = th.randn(batch, 12, in_channels, img, img, device=device)
+    y = model(x)
+    assert y.shape == (batch, 12, out_channels, img, img)
+    assert th.isfinite(y).all()
+
+
+def test_HEALPixUNet_in_stepper():
+    """End-to-end build of a HEALPixUNet through the stepper config."""
+    in_channels = 3
+    out_channels = 3
+    img = 8
+    encoder = encoder_config(
+        conv_next_block_config(),
+        down_sampling_block_config(),
+        n_channels=[16, 32, 64],
+    )
+    decoder = UNetDecoderConfig(
+        conv_block=conv_next_block_config(),
+        up_sampling_block=up_sampling_block_config(),
+        recurrent_block=None,
+        output_layer=output_layer_config(),
+        n_channels=[64, 32, 16],
+        dilations=[4, 2, 1],
+    )
+
+    hpx_unet_config_data = {
+        "encoder": dataclasses.asdict(encoder),
+        "decoder": dataclasses.asdict(decoder),
+        "nside": img,
+    }
+
+    horizontal_coordinates = HEALPixCoordinates(
+        th.arange(12), th.arange(img), th.arange(img)
+    )
+    device = get_device()
+    vertical_coordinate = HybridSigmaPressureCoordinate(
+        ak=th.arange(in_channels), bk=th.arange(in_channels)
+    ).to(device)
+    stepper_config = StepperConfig(
+        step=StepSelector(
+            type="single_module",
+            config=dataclasses.asdict(
+                SingleModuleStepConfig(
+                    builder=ModuleSelector(
+                        type="HEALPixUNet", config=hpx_unet_config_data
+                    ),
+                    in_names=["x"],
+                    out_names=["x"],
+                    normalization=NetworkAndLossNormalizationConfig(
+                        network=NormalizationConfig(
+                            means={"x": float(np.random.randn(1).item())},
+                            stds={"x": float(np.random.randn(1).item())},
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    stepper = stepper_config.get_stepper(
+        dataset_info=DatasetInfo(
+            horizontal_coordinates=horizontal_coordinates,
+            vertical_coordinate=vertical_coordinate,
+            timestep=TIMESTEP,
+        ),
+    )
+    assert len(stepper.modules) == 1
+    assert type(stepper.modules[0].module) is HEALPixUNet

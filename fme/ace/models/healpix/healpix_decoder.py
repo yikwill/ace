@@ -39,7 +39,8 @@ class UNetDecoderConfig:
         output_channels: Number of output channels, by default 1.
         dilations: List of dilation rates for the layers, by default None.
         enable_nhwc: Flag to enable NHWC data format, by default False.
-        enable_healpixpad: Flag to enable HEALPix padding, by default False.
+        enable_healpixpad: Deprecated legacy toggle; omitted (``None``) unless migrating
+            old configs without ``hpx_padding_mode``.
     """
 
     conv_block: ConvBlockConfig
@@ -51,7 +52,7 @@ class UNetDecoderConfig:
     output_channels: int = 1
     dilations: Optional[list] = None
     enable_nhwc: bool = False
-    enable_healpixpad: bool = False
+    enable_healpixpad: Optional[bool] = None
     hpx_padding_mode: Optional[str] = None
     nside: Optional[int] = None
     compile_padding: bool = False
@@ -94,7 +95,7 @@ class UNetDecoder(nn.Module):
         output_channels: int = 1,
         dilations: Optional[list] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
+        enable_healpixpad: Optional[bool] = None,
         hpx_padding_mode: Optional[str] = None,
         nside: Optional[int] = None,
         compile_padding: bool = False,

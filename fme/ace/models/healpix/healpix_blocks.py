@@ -142,6 +142,8 @@ class ConvBlockConfig:
     nside: Optional[int] = None
     compile_padding: bool = False
     upsample_mode: str = "nearest"
+    scale_factor: Optional[int] = None
+    mode: Optional[str] = None
     block_type: Literal[
         "BasicConvBlock",
         "ConvNeXtBlock",
@@ -151,6 +153,13 @@ class ConvBlockConfig:
         "TransposedConvUpsample",
         "SmoothedInterpolateConv",
     ] = "BasicConvBlock"
+
+    def __post_init__(self):
+        # Accept Modulus-style SmoothedInterpolateConv keys.
+        if self.scale_factor is not None:
+            self.stride = self.scale_factor
+        if self.mode is not None:
+            self.upsample_mode = self.mode
 
     def build(self) -> nn.Module:
         """
@@ -252,13 +261,17 @@ class ConvBlockConfig:
                 compile_padding=self.compile_padding,
             )
         elif self.block_type == "SmoothedInterpolateConv":
+            upsample_scale_factor = (
+                self.scale_factor if self.scale_factor is not None else self.stride
+            )
+            upsample_mode = self.mode if self.mode is not None else self.upsample_mode
             return SmoothedInterpolateConv(
                 in_channels=self.in_channels,
                 out_channels=self.out_channels,
                 kernel_size=self.kernel_size,
                 dilation=self.dilation,
-                scale_factor=self.stride,
-                mode=self.upsample_mode,
+                scale_factor=upsample_scale_factor,
+                mode=upsample_mode,
                 activation=self.activation.build() if self.activation else None,
                 enable_nhwc=self.enable_nhwc,
                 enable_healpixpad=self.enable_healpixpad,

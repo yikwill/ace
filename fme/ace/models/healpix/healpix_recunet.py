@@ -82,10 +82,13 @@ class HEALPixRecUNet(nn.Module):
                 Number of model steps to initialize recurrent states.
             enable_nhwc: bool, optional
                 Model with [N, H, W, C] instead of [N, C, H, W].
-            enable_healpixpad: bool, optional
-                Deprecated legacy padding toggle.
-            hpx_padding_mode: str, optional
+            enable_healpixpad: bool or None, optional
+                Deprecated legacy padding toggle. ``None`` means unset; ignored when
+                ``hpx_padding_mode`` is set. If omitted together with ``hpx_padding_mode``,
+                defaults to ``earth2grid``.
+            hpx_padding_mode: str or None, optional
                 HEALPix padding backend (``earth2grid``, ``karlbauer``, ``isolatitude``).
+                Overrides ``enable_healpixpad`` when set.
             compile_padding: bool, optional
                 If True, applies ``torch.compile`` to isolatitude padding modules.
             nside: Sequence[int] | int | None, optional
@@ -132,10 +135,14 @@ class HEALPixRecUNet(nn.Module):
         self.reset_cycle = int(pd.Timedelta(reset_cycle).total_seconds() // 3600)
         self.presteps = presteps
         self.enable_nhwc = enable_nhwc
-        if hpx_padding_mode is None:
-            self.hpx_padding_mode = "earth2grid" if enable_healpixpad else "karlbauer"
-        else:
+        if hpx_padding_mode is not None:
             self.hpx_padding_mode = hpx_padding_mode
+        elif enable_healpixpad is None:
+            self.hpx_padding_mode = "earth2grid"
+        else:
+            self.hpx_padding_mode = (
+                "earth2grid" if enable_healpixpad else "karlbauer"
+            )
         self.compile_padding = compile_padding
 
         levels = len(encoder.n_channels)

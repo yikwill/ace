@@ -16,7 +16,7 @@
 # limitations under the License.
 
 import dataclasses
-from typing import Literal, Optional
+from typing import Literal, Optional, Sequence
 
 import torch as th
 import torch.nn as nn
@@ -153,14 +153,20 @@ class DownsamplingBlockConfig:
     nside: Optional[int] = None
     compile_padding: bool = False
     in_channels: Optional[int] = None
-    resample_filter: tuple[float, ...] = (1.0, 2.0, 1.0)
+    resample_filter: Sequence[float] = (1.0, 2.0, 1.0)
     dealias_stride: int = 2
+    stride: Optional[int] = None
+
+    def __post_init__(self):
+        # Accept Modulus-style config key `stride` as alias for legacy `dealias_stride`.
+        if self.stride is not None:
+            self.dealias_stride = self.stride
 
     def downsample_spatial_factor(self) -> int:
         if self.block_type in ("MaxPool", "AvgPool"):
             return self.pooling
         if self.block_type == "DealiasedDownsample":
-            return self.dealias_stride
+            return self.stride if self.stride is not None else self.dealias_stride
         raise ValueError(f"Unsupported block type: {self.block_type}")
 
     def build(self) -> nn.Module:
@@ -196,10 +202,13 @@ class DownsamplingBlockConfig:
                 raise ValueError(
                     "DealiasedDownsample requires in_channels (set by UNetEncoder before build)"
                 )
+            downsample_stride = (
+                self.stride if self.stride is not None else self.dealias_stride
+            )
             return DealiasedDownsample(
                 in_channels=self.in_channels,
                 resample_filter=self.resample_filter,
-                stride=self.dealias_stride,
+                stride=downsample_stride,
                 enable_nhwc=self.enable_nhwc,
                 enable_healpixpad=self.enable_healpixpad,
                 hpx_padding_mode=self.hpx_padding_mode,

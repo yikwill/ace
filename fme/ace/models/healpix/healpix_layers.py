@@ -16,15 +16,20 @@
 # limitations under the License.
 
 """
-HEALPix convolution wrapper and re-exports for padding utilities.
+HEALPix convolution / interpolation wrapper.
 
-Face layout and padding modes are documented in ``healpix_paddings``.
+Builds a small ``Sequential`` that optionally prepends a HEALPix-aware padding module,
+then the user-supplied base layer (e.g. ``Conv2d``). Inputs are face tensors with
+12 HEALPix faces; see ``healpix_paddings`` for face ordering and padding modes.
 """
 
 from __future__ import annotations
 
+import logging
+
 import torch as th
-import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 from .healpix_paddings import (
     HEALPixFoldFaces,
@@ -41,24 +46,7 @@ from .healpix_paddings import (
 )
 
 
-def _symmetric_pad_width(kernel_size, dilation) -> int:
-    """Effective HEALPix edge pad (per side) for conv-like geometry."""
-    if isinstance(kernel_size, int):
-        ks = (kernel_size,)
-    else:
-        ks = tuple(kernel_size)
-    if isinstance(dilation, int):
-        dil = (dilation,) * len(ks)
-    else:
-        dil = tuple(dilation)
-        if len(dil) == 1 and len(ks) > 1:
-            dil = dil * len(ks)
-    if len(dil) != len(ks):
-        raise ValueError("dilation must be int, or tuple matching kernel_size")
-    return max((((k - 1) // 2) * d) for k, d in zip(ks, dil))
-
-
-class HEALPixLayer(nn.Module):
+class HEALPixLayer(th.nn.Module):
     """
     Apply a base ``torch.nn.Module`` on data laid out as HEALPix faces.
 
@@ -69,30 +57,41 @@ class HEALPixLayer(nn.Module):
     def __init__(
         self,
         layer,
-        hpx_padding_mode: str | None = "earth2grid",
+        hpx_padding_mode=None,
         nside: int | None = None,
         compile_padding: bool = False,
         **kwargs,
     ):
         """
-        Args:
-            layer: Base ``torch.nn`` layer class to wrap (e.g. ``nn.Conv2d``).
-            hpx_padding_mode: HEALPix padding backend. ``"earth2grid"`` matches legacy
-                ``enable_healpixpad=True`` behavior; ``"karlbauer"`` and
-                ``"isolatitude"`` select pure-PyTorch implementations.
-            nside: Native face size, required for ``hpx_padding_mode="isolatitude"``.
-            compile_padding: If True, compile the HEALPix padding module.
-            **kwargs: Keyword args forwarded to ``layer`` and HEALPix wrapper options.
+        Parameters
+        ----------
+        layer : type or torch.nn.Module
+            Layer class (e.g. ``torch.nn.Conv2d``) or module; must match the
+            detection logic for convolution vs interpolation vs other.
+        hpx_padding_mode : str, optional
+            Which padding implementation to use (``None`` means omitted; default ``earth2grid``):
+            - ``"earth2grid"`` — ``earth2grid.healpix.pad`` (default).
+            - ``"karlbauer"`` — Karlbauer et al. (2024) face stitching, same result as earth2grid but slower.
+            - ``"isolatitude"`` — alternate padding scheme which preserves isolatitude signals.
+        nside : int or None, optional
+            Native resolution of each HEALPix face (height = width). Required when
+            ``hpx_padding_mode=="isolatitude"``.
+        compile_padding : bool, optional
+            Whether to wrap isolatitude padding in ``_CompilePaddingWrapper``. Only
+            supported when ``hpx_padding_mode="isolatitude"``.
+        **kwargs
+            Forwarded to ``layer`` after removing ``enable_nhwc`` and deprecated
+            ``enable_healpixpad`` (e.g. ``in_channels``, ``out_channels``, ``kernel_size``,
+            ``dilation``, ``enable_nhwc``). If ``nside`` or ``compile_padding`` appears
+            here (e.g. Hydra), it is consumed and overrides the corresponding argument.
         """
         super().__init__()
-        layers_list: list[nn.Module] = []
+        layers = []
 
         legacy_enable_healpixpad = pop_deprecated_enable_healpixpad_from_kwargs(kwargs)
         hpx_padding_mode = warn_deprecated_enable_healpixpad(
             legacy_enable_healpixpad, hpx_padding_mode
         )
-        self.hpx_padding_mode = hpx_padding_mode
-
         if "nside" in kwargs:
             _ns = kwargs.pop("nside")
             nside = int(_ns) if _ns is not None else None
@@ -105,33 +104,45 @@ class HEALPixLayer(nn.Module):
         else:
             enable_nhwc = False
 
-        if "enable_healpixpad" in kwargs and kwargs["enable_healpixpad"]:
-            raise NotImplementedError(
-                "HEALPixPaddingv2 is not available in this environment"
+        kernel_size = 3 if "kernel_size" not in kwargs else kwargs["kernel_size"]
+        dilation = 1 if "dilation" not in kwargs else kwargs["dilation"]
+        padding = ((kernel_size - 1) // 2) * dilation
+
+        # Define a HEALPixPadding layer if padding is necessary
+        if padding > 0:
+            # Disable native padding for conv layers
+            if layer.__bases__[0] is th.nn.modules.conv._ConvNd:
+                kwargs["padding"] = 0
+            padding_layer = make_hpx_padding_layer(
+                padding=padding,
+                hpx_padding_mode=hpx_padding_mode,
+                enable_nhwc=enable_nhwc,
+                nside=nside,
             )
+            if compile_padding:
+                padding_layer = th.compile(padding_layer)
+            layers.append(padding_layer)
 
-        if "enable_healpixpad" in kwargs:
-            del kwargs["enable_healpixpad"]
-
-        if not isinstance(layer, type) or not issubclass(layer, th.nn.Module):
-            raise TypeError(
-                f"Expected a subclass of torch.nn.Module, got {type(layer).__name__}"
-            )
-        # Define a HEALPixPadding layer if the given layer is a convolution layer
-        if layer.__bases__[0] is nn.modules.conv._ConvNd and kwargs["kernel_size"] > 1:
-            kwargs["padding"] = 0  # Disable native padding
-            kernel_size = 3 if "kernel_size" not in kwargs else kwargs["kernel_size"]
-            dilation = 1 if "dilation" not in kwargs else kwargs["dilation"]
-            padding = ((kernel_size - 1) // 2) * dilation
-            layers_list.append(HEALPixPadding(padding=padding, enable_nhwc=enable_nhwc))
-
-        layers_list.append(layer(**kwargs))
-        self.layers = nn.Sequential(*layers_list)
+        layers.append(layer(**kwargs))
+        self.layers = th.nn.Sequential(*layers)
 
         if enable_nhwc:
             self.layers = self.layers.to(memory_format=th.channels_last)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
+        """
+        Run padding (if configured) and the wrapped layer.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Tensor of shape (B*F, C, H, W).
+
+        Returns
+        -------
+        torch.Tensor
+            Output of the composed ``Sequential`` of shape (B*F, C', H', W').
+        """
         return self.layers(x)
 
 

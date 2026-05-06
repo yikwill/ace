@@ -67,37 +67,38 @@ def warn_deprecated_enable_healpixpad(
     Resolve ``hpx_padding_mode`` for module construction, accounting for deprecated
     ``enable_healpixpad``.
 
-    ``hpx_padding_mode`` uses ``None`` in signatures to mean \"omitted\" (e.g. Hydra
-    default). Omitted values are treated as the implicit default ``earth2grid`` except
-    when ``enable_healpixpad`` is set and ``hpx_padding_mode`` was omitted: then
-    ``False`` maps to ``karlbauer`` (legacy behavior) and ``True`` to ``earth2grid``.
+    If ``hpx_padding_mode`` is not ``None``, it fully determines the backend: the
+    legacy flag is ignored and **no** deprecation warning is emitted.
 
-    If ``hpx_padding_mode`` was explicitly provided (non-``None``), it wins over
-    ``enable_healpixpad`` after logging the deprecation warning.
+    If ``hpx_padding_mode`` is omitted (``None``) and ``enable_healpixpad`` is also
+    omitted (``None``), the default backend is ``earth2grid``.
+
+    If ``hpx_padding_mode`` is omitted but ``enable_healpixpad`` is explicitly
+    ``True`` or ``False``, a deprecation warning is logged and legacy mapping applies:
+    ``True`` → ``earth2grid``, ``False`` → ``karlbauer``.
 
     Parameters
     ----------
     enable_healpixpad : bool or None
-        Deprecated flag from config or kwargs; ``None`` means not set.
+        Deprecated flag from config or kwargs; ``None`` means not set / do not forward
+        deprecated flag into ``HEALPixLayer``.
     hpx_padding_mode : str or None
-        Requested mode, or ``None`` if omitted (normalized to ``earth2grid`` before
-        applying legacy mapping).
+        Requested padding backend, or ``None`` when omitted.
 
     Returns
     -------
     str
         Resolved padding mode to store and pass to child modules.
     """
-    hpx_padding_mode_explicit = hpx_padding_mode is not None
-    if hpx_padding_mode is None:
-        hpx_padding_mode = "earth2grid"
-    if enable_healpixpad is None:
+    if hpx_padding_mode is not None:
         return hpx_padding_mode
+
+    if enable_healpixpad is None:
+        return "earth2grid"
+
     msg = _ENABLE_HEALPIXPAD_DEPRECATION_MSG
     msg = f"{msg} Current hpx_padding_mode={hpx_padding_mode!r}, enable_healpixpad={enable_healpixpad!r}."
     logger.warning(f"WARNING: {msg}")
-    if hpx_padding_mode_explicit:
-        return hpx_padding_mode
     if enable_healpixpad:
         return "earth2grid"
     return "karlbauer"

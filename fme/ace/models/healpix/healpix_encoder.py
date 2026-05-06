@@ -38,7 +38,8 @@ class UNetEncoderConfig:
         n_layers: Number of layers in each block, by default (2, 2, 1).
         dilations: List of dilation rates for the layers, by default None.
         enable_nhwc: Flag to enable NHWC data format, by default False.
-        enable_healpixpad: Flag to enable HEALPix padding, by default False.
+        enable_healpixpad: Deprecated legacy toggle; omitted (``None``) unless migrating
+            old configs without ``hpx_padding_mode``.
     """
 
     conv_block: ConvBlockConfig
@@ -48,7 +49,7 @@ class UNetEncoderConfig:
     n_layers: List[int] = dataclasses.field(default_factory=lambda: [2, 2, 1])
     dilations: Optional[list] = None
     enable_nhwc: bool = False
-    enable_healpixpad: bool = False
+    enable_healpixpad: Optional[bool] = None
     hpx_padding_mode: Optional[str] = None
     nside: Optional[int] = None
     compile_padding: bool = False
@@ -87,7 +88,7 @@ class UNetEncoder(nn.Module):
         n_layers: Sequence = (2, 2, 1),
         dilations: Optional[list] = None,
         enable_nhwc: bool = False,
-        enable_healpixpad: bool = False,
+        enable_healpixpad: Optional[bool] = None,
         hpx_padding_mode: Optional[str] = None,
         nside: Optional[int] = None,
         compile_padding: bool = False,
@@ -125,6 +126,7 @@ class UNetEncoder(nn.Module):
                 down_sampling_block.hpx_padding_mode = hpx_padding_mode
                 down_sampling_block.compile_padding = compile_padding
                 down_sampling_block.nside = face_nside
+                down_sampling_block.in_channels = old_channels
                 modules.append(
                     down_sampling_block.build()  # Shapes are not used in these calls.
                 )
