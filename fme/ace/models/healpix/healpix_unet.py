@@ -126,8 +126,8 @@ class HEALPixUNet(nn.Module):
             )
         self.nside = nside_levels
 
-        self.fold = HEALPixFoldFaces()
-        self.unfold = HEALPixUnfoldFaces(num_faces=12)
+        self.fold = HEALPixFoldFaces(enable_nhwc=enable_nhwc)
+        self.unfold = HEALPixUnfoldFaces(num_faces=12, enable_nhwc=enable_nhwc)
 
         encoder.input_channels = input_channels
         encoder.enable_nhwc = enable_nhwc
