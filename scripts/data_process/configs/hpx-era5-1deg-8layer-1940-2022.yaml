@@ -1,0 +1,8 @@
+runs:
+  2025-10-04-healpix-era5-dataset: ""  # no real data source, config only for computing stats
+data_output_directory: /pscratch/sd/e/elynnwu/fme-dataset
+stats:
+  output_directory: /pscratch/sd/y/yikwill/datasets/ace
+  start_date: "1990-01-01"
+  end_date: "2019-12-31"
+  data_type: HPX
