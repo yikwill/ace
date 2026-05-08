@@ -34,9 +34,6 @@ DROP_VARIABLES = (
         "mask_sea_ice_volume",
         "mask_sea_ice_fraction",
         "mask_ocean_sea_ice_fraction",
-        "land_fraction",
-        "ocean_fraction",
-        "sea_ice_fraction",
     ]
     + [f"ak_{i}" for i in range(9)]
     + [f"bk_{i}" for i in range(9)]
