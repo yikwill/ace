@@ -79,7 +79,7 @@ version = {attr = "fme.__version__"}
 find = {}
 
 [tool.setuptools.package-data]
-"fme.core.cuhpx" = ["data/*.npy"]
+"fme.core.cuhpx" = ["data/*.npy", "data/*.fits"]
 
 [tool.uv]
 cache-keys = [
