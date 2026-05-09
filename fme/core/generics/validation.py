@@ -112,30 +112,31 @@ def run_validation(
     if record_logs is None:
         record_logs = _get_record_to_wandb()
 
-    timer = GlobalTimer.get_instance()
+    with GlobalTimer():
+        timer = GlobalTimer.get_instance()
 
-    logging.info("Starting validation loop")
+        logging.info("Starting validation loop")
 
-    run_validation_loop(
-        stepper=train_stepper,
-        valid_data=validation_data,
-        aggregator=aggregator,
-        ema=ema,
-        validate_using_ema=validate_using_ema,
-        compute_derived_variables=compute_derived_variables,
-        log_progress=log_progress,
-    )
+        run_validation_loop(
+            stepper=train_stepper,
+            valid_data=validation_data,
+            aggregator=aggregator,
+            ema=ema,
+            validate_using_ema=validate_using_ema,
+            compute_derived_variables=compute_derived_variables,
+            log_progress=log_progress,
+        )
 
-    logging.info("Flushing validation diagnostics")
-    with timer.context("flush_diagnostics"):
-        aggregator.flush_diagnostics(subdir=diagnostics_subdir)
+        logging.info("Flushing validation diagnostics")
+        with timer.context("flush_diagnostics"):
+            aggregator.flush_diagnostics(subdir=diagnostics_subdir)
 
-    logging.info("Getting validation aggregator logs")
-    with timer.context("aggregator"):
-        val_logs = aggregator.get_logs(label=label)
+        logging.info("Getting validation aggregator logs")
+        with timer.context("aggregator"):
+            val_logs = aggregator.get_logs(label=label)
 
-    with timer.context("wandb_logging"):
-        record_logs(val_logs)
+        with timer.context("wandb_logging"):
+            record_logs(val_logs)
 
-    logging.info("Validation complete")
-    return val_logs
+        logging.info("Validation complete")
+        return val_logs

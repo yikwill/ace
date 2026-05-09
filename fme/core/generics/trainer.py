@@ -71,6 +71,7 @@ from fme.core.generics.inference import run_inference
 from fme.core.generics.lr_tuning import LRTuningConfig, run_lr_tuning_trial
 from fme.core.generics.metrics_aggregator import MetricsAggregator
 from fme.core.generics.train_stepper import TrainOutputABC, TrainStepperABC
+from fme.core.generics.validation import run_validation_loop
 from fme.core.optimization import NullOptimization, Optimization
 from fme.core.timing import GlobalTimer
 from fme.core.training_history import TrainingJob
@@ -338,6 +339,19 @@ class Trainer:
     def _copy_ema(self, modules: torch.nn.ModuleList) -> EMATracker:
         """Create a new EMATracker initialized from the current EMA state."""
         return EMATracker.from_state(self._ema.get_state(), modules)
+
+    def _validate_stepper(self, stepper: TrainStepperABC, ema: EMATracker) -> float:
+        aggregator = self._aggregator_builder.get_validation_aggregator()
+        with GlobalTimer():
+            run_validation_loop(
+                stepper=stepper,
+                valid_data=self.valid_data,
+                aggregator=aggregator,
+                ema=ema,
+                validate_using_ema=self.config.validate_using_ema,
+            )
+        val_logs = aggregator.get_logs(label="val")
+        return val_logs["val/mean/loss"]
 
     def _maybe_tune_lr(self):
         cfg = self.config.lr_tuning
