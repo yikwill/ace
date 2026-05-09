@@ -24,9 +24,11 @@ else
 
     echo "Creating environment at $ENVIRONMENT_PATH"
     module load python
-    conda create -p $ENVIRONMENT_PATH python=3.11 pip -y
+    conda create -p $ENVIRONMENT_PATH python=3.11 pip gxx_linux-64 -y
     conda run --no-capture-output -p $ENVIRONMENT_PATH python -m pip install uv
-    conda run --no-capture-output -p $ENVIRONMENT_PATH uv pip install -c constraints.txt .[dev,docs]
+    conda run --no-capture-output -p $ENVIRONMENT_PATH uv pip install -c constraints.txt -e .[dev,docs,graphcast]
+    conda run --no-capture-output -p $ENVIRONMENT_PATH uv pip install --no-build-isolation -c constraints.txt -r requirements-healpix.txt
+    conda run --no-capture-output -p $ENVIRONMENT_PATH uv pip install -r analysis-deps.txt
     rm -rf $SCRATCH/ace-slurm-env/temp/ace
 fi
 
