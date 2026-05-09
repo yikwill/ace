@@ -338,13 +338,14 @@ class Trainer:
 
     def _validate_stepper(self, stepper: TrainStepperABC, ema: EMATracker) -> float:
         aggregator = self._aggregator_builder.get_validation_aggregator()
-        run_validation_loop(
-            stepper=stepper,
-            valid_data=self.valid_data,
-            aggregator=aggregator,
-            ema=ema,
-            validate_using_ema=self.config.validate_using_ema,
-        )
+        with GlobalTimer():
+            run_validation_loop(
+                stepper=stepper,
+                valid_data=self.valid_data,
+                aggregator=aggregator,
+                ema=ema,
+                validate_using_ema=self.config.validate_using_ema,
+            )
         val_logs = aggregator.get_logs(label="val")
         return val_logs["val/mean/loss"]
 
