@@ -257,10 +257,6 @@ class Trainer:
 
         self.train_data = train_data
         self.valid_data = validation_data
-        for gridded_data, name in zip(
-            (self.train_data, self.valid_data), ("train", "valid")
-        ):
-            gridded_data.log_info(name)
 
         self.num_batches_seen = 0
         self._start_epoch = 0
@@ -366,17 +362,13 @@ class Trainer:
         self.train_data.set_epoch(self._epochs_trained + 1)
         new_lr = run_lr_tuning_trial(
             train_data=self.train_data,
-            valid_data=self.valid_data,
             optimization=self.optimization,
             copy_stepper=self._copy_stepper,
             build_optimization=self._build_optimization,
             copy_ema=self._copy_ema,
             config=cfg,
             current_lr=self.optimization.learning_rate,
-            get_validation_aggregator=(
-                self._aggregator_builder.get_validation_aggregator
-            ),
-            validate_using_ema=self.config.validate_using_ema,
+            validate_stepper=self._validate_stepper,
         )
         if new_lr is not None:
             logging.info(f"LR tuning: adopting candidate LR {new_lr}")
