@@ -68,7 +68,7 @@ validation_loader:
       stop_time: '2014-12-31'
       step: 3
 optimization:
-  use_gradient_accumulation: true
+  use_gradient_accumulation: false
   enable_automatic_mixed_precision: false
   lr: 0.0001
   optimizer_type: AdamW
