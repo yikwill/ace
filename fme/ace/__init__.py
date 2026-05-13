@@ -1,8 +1,8 @@
 import sys
 
-from fme.ace.aggregator.inference import (
+from fme.ace.aggregator.inference.main import (
+    LegacyFlagInferenceEvaluatorAggregatorConfig,
     StepMeanEntry,
-    TypedMetricInferenceEvaluatorAggregatorConfig,
 )
 from fme.ace.aggregator.one_step import OneStepAggregatorConfig
 from fme.ace.aggregator.train import TrainAggregatorConfig
@@ -35,13 +35,13 @@ from fme.ace.inference.inference import (
     InitialConditionConfig,
     run_inference_from_config,
 )
-from fme.ace.models.healpix.healpix_activations import (
-    CappedGELUConfig,
+from fme.ace.models.healpix.healpix_activations import CappedGELUConfig
+from fme.ace.models.healpix.healpix_blocks import (
+    ConvBlockConfig,
     DownsamplingBlockConfig,
+    UpsamplingBlockConfig,
 )
-from fme.ace.models.healpix.healpix_blocks import ConvBlockConfig, RecurrentBlockConfig
 from fme.ace.registry.hpx import (
-    HEALPixRecUNetBuilder,
     HEALPixUNetBuilder,
     UNetDecoderConfig,
     UNetEncoderConfig,
