@@ -13,6 +13,8 @@ export FME_TRAIN_DIR=/pscratch/sd/e/elynnwu/fme-dataset
 export FME_VALID_DIR=/pscratch/sd/e/elynnwu/fme-dataset
 export FME_STATS_DIR=/pscratch/sd/y/yikwill/datasets/ace/2025-10-04-healpix-era5-dataset
 
+CONFIG_FILE=config-train-dlesym-recipe.yaml
+
 # if resuming a failed job, provide its slurm job ID below and uncomment;
 # note that information entered above should be consistent with that of
 # the failed job
@@ -30,7 +32,7 @@ mkdir -p $CONFIG_DIR
 # else
 #   cp ${PSCRATCH}/fme-output/${RESUME_JOB_ID}/job_config/train-config.yaml $CONFIG_DIR/train-config.yaml
 # fi
-cp config-train.yaml $CONFIG_DIR/train-config.yaml
+cp $CONFIG_FILE $CONFIG_DIR/train-config.yaml
 cp run-train-perlmutter.sh $CONFIG_DIR/run-train-perlmutter.sh  # copy for reproducibility/tracking
 cp sbatch-scripts/requeueable-train.sh $CONFIG_DIR/requeueable-train.sh
 cp make-venv.sh $CONFIG_DIR/make-venv.sh
@@ -72,26 +74,3 @@ export MASTER_PORT=29507
 echo "MASTER_ADDR=$MASTER_ADDR MASTER_PORT=$MASTER_PORT"
 
 srun -u $CONFIG_DIR/requeueable-train.sh
-
-sleep 120
-
-# TRAIN_CONFIG=${CONFIG_DIR}/train-config.yaml
-
-# torchrun --nnodes $SLURM_JOB_NUM_NODES \
-#  --nproc_per_node $SLURM_GPUS_ON_NODE \
-#  --rdzv-backend=c10d \
-#  --rdzv-endpoint=$MASTER_ADDR:$MASTER_PORT \
-#  -m fme.ace.train ${TRAIN_CONFIG} &
-
-# pid=$!
-# trap "preempt_handler '$pid'" SIGTERM #this catches preempt SIGTERM from slurm
-# trap "timeout_handler '$pid'" USR1 # this catches timeout USR1 from slurm
-# if wait $pid; then
-#     echo "Training completed successfully. Uploading artifacts..."
-#     $CONFIG_DIR/upload-to-beaker.sh $SLURM_JOB_ID
-# else
-#     echo "Training failed or was interrupted (exit code $?). Skipping upload."
-# fi
-# sleep 120
-
-sleep 120
