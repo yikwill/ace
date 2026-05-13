@@ -141,7 +141,6 @@ stepper:
             dilations: [1, 1, 1]
           enable_nhwc: true
           hpx_padding_mode: isolatitude
-          compile_padding: false
           nside: [64, 32, 16]
       normalization:
         network:
