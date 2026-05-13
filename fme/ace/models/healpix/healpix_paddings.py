@@ -712,7 +712,11 @@ class HEALPixPaddingIsolatitude(th.nn.Module):
         pos_v1 = self._pos_v1
         if pos_v1.numel() > 0:
             Nv1 = int(pos_v1.numel())
-            g0_sub = g0.index_select(dim=2, index=pos_v1.to(device=data.device))
+            # Clone gather indices for this forward only. Reusing the registered
+            # buffer tensor across index_select + index_add_ (and across checkpoint
+            # recompute / multi-step graphs) can trip version-counter errors under AMP.
+            pos_idx = pos_v1.to(device=data.device, non_blocking=True).clone()
+            g0_sub = g0.index_select(dim=2, index=pos_idx)
 
             i1_sub = self._index1_pos_v1.view(1, 1, Nv1).expand(B, C, Nv1)
             g1_sub = flat.gather(dim=2, index=i1_sub.to(device=data.device))
@@ -721,7 +725,7 @@ class HEALPixPaddingIsolatitude(th.nn.Module):
             #             = g0_sub + 0.5 * (g1_sub - g0_sub)
             delta = (g1_sub - g0_sub) * 0.5
             out_flat = g0.clone()
-            out_flat.index_add_(dim=2, index=pos_v1.to(device=data.device), source=delta)
+            out_flat.index_add_(dim=2, index=pos_idx, source=delta)
         else:
             out_flat = g0
 
