@@ -195,13 +195,6 @@ class ConvBlockConfig:
         "Multi_SymmetricConvNeXtBlock",
     ] = "BasicConvBlock"
 
-    def __post_init__(self):
-        # Accept Modulus-style SmoothedInterpolateConv keys.
-        if self.scale_factor is not None:
-            self.stride = self.scale_factor
-        if self.mode is not None:
-            self.upsample_mode = self.mode
-
     def build(self) -> nn.Module:
         if self.block_type == "BasicConvBlock":
             return BasicConvBlock(
