@@ -13,6 +13,8 @@ export FME_TRAIN_DIR=/pscratch/sd/e/elynnwu/fme-dataset
 export FME_VALID_DIR=/pscratch/sd/e/elynnwu/fme-dataset
 export FME_STATS_DIR=/pscratch/sd/y/yikwill/datasets/ace/2025-10-04-healpix-era5-dataset
 
+CONFIG_FILE=config-train-dlesym-recipe.yaml
+
 # if resuming a failed job, provide its slurm job ID below and uncomment;
 # note that information entered above should be consistent with that of
 # the failed job
@@ -26,7 +28,7 @@ UUID=$(uuidgen)
 export CONFIG_DIR=${PSCRATCH}/fme-config/${UUID}
 mkdir -p $CONFIG_DIR
 if [ -z "${RESUME_JOB_ID}" ]; then
-  cp config-train.yaml $CONFIG_DIR/train-config.yaml
+  cp $CONFIG_FILE $CONFIG_DIR/train-config.yaml
 else
   cp ${PSCRATCH}/fme-output/${RESUME_JOB_ID}/job_config/train-config.yaml $CONFIG_DIR/train-config.yaml
 fi
