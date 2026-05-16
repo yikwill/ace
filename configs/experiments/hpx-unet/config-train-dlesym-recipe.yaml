@@ -34,6 +34,7 @@ inference:
       spatial_dimensions: healpix
     num_data_workers: 4
   aggregator:
+    log_zonal_mean_images: false
     log_histograms: true
     time_mean_reference_data: FME_STATS_DIR/time-mean.nc
 logging:
