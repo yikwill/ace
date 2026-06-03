@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH -A m1266
+#SBATCH -A e3sm
 #SBATCH -q preempt
 #SBATCH -C gpu
 #SBATCH -J train-hpx-unet
@@ -8,7 +8,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=128
-#SBATCH -t 48:00:00
+#SBATCH -t 12:00:00
 #SBATCH --output=joblogs/%j.out
 #SBATCH --signal=USR1@60
 #SBATCH --requeue

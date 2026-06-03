@@ -3,8 +3,8 @@
 set -x
 
 # wandb config
-export WANDB_NAME=PM-AIMIP-HPXUNET-train
-export WANDB_RUN_GROUP=2025-05-06-AIMIP-HPXUNET
+export WANDB_NAME=PM-AIMIP-HPXUNET-DLESYM-RECIPE-train
+export WANDB_RUN_GROUP=2025-05-14-AIMIP-HPXUNET-DLESYM-RECIPE
 
 export COMMIT=$(git rev-parse --short HEAD)
 
@@ -40,5 +40,5 @@ cp upload-to-beaker.sh $CONFIG_DIR/upload-to-beaker.sh
 export FME_VENV=$($CONFIG_DIR/make-venv.sh $COMMIT | tail -n 1)
 conda activate $FME_VENV
 python -m fme.ace.validate_config --config_type train $CONFIG_DIR/train-config.yaml
-sbatch -t 00:30:00 -q debug sbatch-scripts/sbatch-train.sh  # use this for debugging config/submission
-# sbatch sbatch-scripts/sbatch-train.sh
+# sbatch -t 00:30:00 -q debug sbatch-scripts/sbatch-train.sh  # use this for debugging config/submission
+sbatch sbatch-scripts/sbatch-train.sh
