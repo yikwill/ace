@@ -1,5 +1,6 @@
 import dataclasses
-from typing import Optional, Sequence
+from collections.abc import Sequence
+from typing import Literal
 
 import torch.nn as nn
 
@@ -22,17 +23,17 @@ class HEALPixUNetBuilder(ModuleConfig):
     Parameters:
         encoder: UNet encoder configuration.
         decoder: UNet decoder configuration.
-        enable_nhwc: Use NHWC tensor layout for child modules.
-        hpx_padding_mode: HEALPix padding backend (``"earth2grid"``,
-            ``"karlbauer"``, ``"isolatitude"``). Default ``"earth2grid"``.
-        nside: Face size(s) per UNet level (shallowest to deepest).
+        hpx_padding_mode: HEALPix padding backend applied to all child modules
+            (``"earth2grid"``, ``"karlbauer"``, ``"isolatitude"``). Default
+            ``"earth2grid"``.
+        nside: Face height/width per UNet level (shallowest to deepest). Required for
+            ``isolatitude`` padding.
     """
 
     encoder: UNetEncoderConfig
     decoder: UNetDecoderConfig
-    enable_nhwc: bool = False
-    hpx_padding_mode: str = "earth2grid"
-    nside: Optional[Sequence[int] | int] = None
+    hpx_padding_mode: Literal["earth2grid", "karlbauer", "isolatitude"] = "earth2grid"
+    nside: Sequence[int] | None = None
 
     def build(
         self,
@@ -58,7 +59,6 @@ class HEALPixUNetBuilder(ModuleConfig):
             decoder=self.decoder,
             input_channels=n_in_channels,
             output_channels=n_out_channels,
-            enable_nhwc=self.enable_nhwc,
             hpx_padding_mode=self.hpx_padding_mode,
             nside=self.nside,
         )

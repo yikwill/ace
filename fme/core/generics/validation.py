@@ -6,7 +6,7 @@ from typing import TypeVar
 import torch
 
 from fme.core.ema import EMATracker
-from fme.core.generics.aggregator import AggregatorABC
+from fme.core.generics.aggregator import AggregatorABC, AggregatorSummary
 from fme.core.generics.data import GriddedDataABC
 from fme.core.generics.train_stepper import TrainOutputABC, TrainStepperABC
 from fme.core.optimization import NullOptimization
@@ -31,7 +31,7 @@ def run_validation_loop(
 ) -> None:
     """Run the core validation loop: iterate batches and record to aggregator.
 
-    This is the minimal validation loop. It does NOT call `aggregator.get_logs`,
+    This is the minimal validation loop. It does NOT call `aggregator.get_summary`,
     `aggregator.flush_diagnostics`, or log to WandB — callers are responsible
     for those.
 
@@ -46,6 +46,7 @@ def run_validation_loop(
     """
     timer = GlobalTimer.get_instance()
     stepper.set_eval()
+    stepper.seed_eval(seed=0)
     ema_context: contextlib.AbstractContextManager = (
         ema.applied_params(stepper.modules)
         if validate_using_ema and ema is not None
@@ -61,6 +62,7 @@ def run_validation_loop(
                 batch,
                 optimization=no_opt,
                 compute_derived_variables=compute_derived_variables,
+                evaluate_all_steps=True,
             )
             with timer.context("aggregator"):
                 aggregator.record_batch(batch=stepped)
@@ -88,7 +90,7 @@ def run_validation(
     ema: EMATracker | None = None,
     validate_using_ema: bool = False,
     log_progress: bool = False,
-) -> dict[str, float]:
+) -> AggregatorSummary:
     """Run validation loop for a train stepper and validation dataset.
 
     High-level wrapper around `run_validation_loop` that also flushes
@@ -107,36 +109,35 @@ def run_validation(
         log_progress: Whether to log per-batch progress messages.
 
     Returns:
-        Dictionary of validation metrics (keys prefixed by the label).
+        Summary containing validation metrics and the loss scalar.
     """
     if record_logs is None:
         record_logs = _get_record_to_wandb()
 
-    with GlobalTimer():
-        timer = GlobalTimer.get_instance()
+    timer = GlobalTimer.get_instance()
 
-        logging.info("Starting validation loop")
+    logging.info("Starting validation loop")
 
-        run_validation_loop(
-            stepper=train_stepper,
-            valid_data=validation_data,
-            aggregator=aggregator,
-            ema=ema,
-            validate_using_ema=validate_using_ema,
-            compute_derived_variables=compute_derived_variables,
-            log_progress=log_progress,
-        )
+    run_validation_loop(
+        stepper=train_stepper,
+        valid_data=validation_data,
+        aggregator=aggregator,
+        ema=ema,
+        validate_using_ema=validate_using_ema,
+        compute_derived_variables=compute_derived_variables,
+        log_progress=log_progress,
+    )
 
-        logging.info("Flushing validation diagnostics")
-        with timer.context("flush_diagnostics"):
-            aggregator.flush_diagnostics(subdir=diagnostics_subdir)
+    logging.info("Flushing validation diagnostics")
+    with timer.context("flush_diagnostics"):
+        aggregator.flush_diagnostics(subdir=diagnostics_subdir)
 
-        logging.info("Getting validation aggregator logs")
-        with timer.context("aggregator"):
-            val_logs = aggregator.get_logs(label=label)
+    logging.info("Getting validation aggregator summary")
+    with timer.context("aggregator"):
+        summary = aggregator.get_summary(label=label)
 
-        with timer.context("wandb_logging"):
-            record_logs(val_logs)
+    with timer.context("wandb_logging"):
+        record_logs(summary.logs)
 
-        logging.info("Validation complete")
-        return val_logs
+    logging.info("Validation complete")
+    return summary

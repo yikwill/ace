@@ -17,24 +17,58 @@
 
 import dataclasses
 import math
-from typing import Literal, Optional, Sequence, Tuple, Union, cast
+from typing import Literal, Optional, Sequence, Tuple, Union
 
-import torch as th
+import torch
 import torch.nn as nn
 
 from .healpix_activations import CappedGELUConfig
 from .healpix_layers import HEALPixLayer
 
+HpxPaddingMode = Literal["earth2grid", "karlbauer", "isolatitude"]
 
-def _healpix_layer_kwargs(
-    enable_nhwc: bool,
-    hpx_padding_mode: str = "earth2grid",
-    nside: Optional[int] = None,
-) -> dict:
-    """Build keyword arguments passed to ``HEALPixLayer``."""
-    out: dict = {"enable_nhwc": enable_nhwc, "hpx_padding_mode": hpx_padding_mode}
-    if nside is not None:
-        out["nside"] = nside
+
+@dataclasses.dataclass(frozen=True)
+class HEALPixLayerBuildContext:
+    """Per-layer HEALPix runtime settings passed to block ``build`` methods."""
+
+    hpx_padding_mode: HpxPaddingMode = "earth2grid"
+    nside: int | None = None
+    nside_after: int | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class HEALPixBuildContext:
+    """Shared HEALPix runtime settings for a UNet (or encoder/decoder) build.
+
+    Configure ``hpx_padding_mode`` once at the model level; child blocks receive a
+    per-level view via ``layer()``.
+    """
+
+    hpx_padding_mode: HpxPaddingMode = "earth2grid"
+    nside_levels: tuple[int, ...] | None = None
+
+    def layer(
+        self, level: int, *, nside_after: int | None = None
+    ) -> HEALPixLayerBuildContext:
+        nside = None if self.nside_levels is None else self.nside_levels[level]
+        return HEALPixLayerBuildContext(
+            hpx_padding_mode=self.hpx_padding_mode,
+            nside=nside,
+            nside_after=nside_after,
+        )
+
+
+def _healpix_layer_kwargs(ctx: HEALPixLayerBuildContext) -> dict:
+    """
+    Build keyword arguments passed to ``HEALPixLayer``.
+
+    Args:
+        ctx: Per-layer HEALPix build context.
+    """
+    out: dict = {"hpx_padding_mode": ctx.hpx_padding_mode}
+    if ctx.nside is not None:
+        out["nside"] = ctx.nside
     return out
 
 
@@ -42,220 +76,340 @@ def _healpix_layer_kwargs(
 
 
 @dataclasses.dataclass
-class DownsamplingBlockConfig:
-    """
-    Configuration for the downsampling block (pooling or dealiased strided blur).
+class MaxPoolDownsamplingBlockConfig:
+    """Configuration for a HEALPix max-pooling downsample block."""
 
-    Parameters:
-        block_type: One of ``"MaxPool"``, ``"AvgPool"``, or ``"DealiasedDownsample"``.
-        pooling: Pooling size for pool blocks.
-        stride: Spatial stride for ``DealiasedDownsample`` (power of two).
-    """
-
-    block_type: Literal["MaxPool", "AvgPool", "DealiasedDownsample"]
+    block_type: Literal["MaxPool"] = "MaxPool"
     pooling: int = 2
-    enable_nhwc: bool = False
-    hpx_padding_mode: str = "earth2grid"
-    nside: Optional[int] = None
-    in_channels: Optional[int] = None
-    resample_filter: Sequence[float] = (1.0, 2.0, 1.0)
-    stride: int = 2
 
     def downsample_spatial_factor(self) -> int:
-        if self.block_type in ("MaxPool", "AvgPool"):
-            return self.pooling
-        if self.block_type == "DealiasedDownsample":
-            return self.stride
-        raise ValueError(f"Unsupported block type: {self.block_type}")
+        return self.pooling
 
-    def build(self) -> nn.Module:
-        if self.block_type == "MaxPool":
-            return MaxPool(
-                pooling=self.pooling,
-                enable_nhwc=self.enable_nhwc,
-                hpx_padding_mode=self.hpx_padding_mode,
-                nside=self.nside,
-            )
-        if self.block_type == "AvgPool":
-            return AvgPool(
-                pooling=self.pooling,
-                enable_nhwc=self.enable_nhwc,
-                hpx_padding_mode=self.hpx_padding_mode,
-                nside=self.nside,
-            )
-        if self.block_type == "DealiasedDownsample":
-            if self.in_channels is None:
-                raise ValueError(
-                    "DealiasedDownsample requires in_channels "
-                    "(set by UNetEncoder before build)"
-                )
-            return DealiasedDownsample(
-                in_channels=self.in_channels,
-                resample_filter=self.resample_filter,
-                stride=self.stride,
-                enable_nhwc=self.enable_nhwc,
-                hpx_padding_mode=self.hpx_padding_mode,
-                nside=self.nside,
-            )
-        raise ValueError(f"Unsupported block type: {self.block_type}")
+    def build(
+        self,
+        *,
+        in_channels: int | None = None,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        del in_channels
+        layer_ctx = ctx or HEALPixLayerBuildContext()
+        return MaxPool(
+            pooling=self.pooling,
+            hpx_padding_mode=layer_ctx.hpx_padding_mode,
+            nside=layer_ctx.nside,
+        )
 
 
 @dataclasses.dataclass
-class UpsamplingBlockConfig:
-    """
-    Configuration for HEALPix upsampling (transpose conv, interpolate+conv, pure
-    ``nn.Upsample``, etc.).
+class AvgPoolDownsamplingBlockConfig:
+    """Configuration for a HEALPix average-pooling downsample block."""
 
-    ``block_type`` ``"Interpolate"`` uses ``stride`` as ``nn.Upsample`` ``scale_factor``
-    and ``upsample_mode`` as the interpolation mode.
-    """
+    block_type: Literal["AvgPool"] = "AvgPool"
+    pooling: int = 2
 
-    block_type: Literal[
-        "TransposedConvUpsample",
-        "SmoothedInterpolateConv",
-        "Interpolate",
-    ]
-    in_channels: int = 3
-    out_channels: int = 1
+    def downsample_spatial_factor(self) -> int:
+        return self.pooling
+
+    def build(
+        self,
+        *,
+        in_channels: int | None = None,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        del in_channels
+        layer_ctx = ctx or HEALPixLayerBuildContext()
+        return AvgPool(
+            pooling=self.pooling,
+            hpx_padding_mode=layer_ctx.hpx_padding_mode,
+            nside=layer_ctx.nside,
+        )
+
+
+@dataclasses.dataclass
+class DealiasedDownsampleBlockConfig:
+    """Configuration for a dealiased strided-blur downsample block."""
+
+    block_type: Literal["DealiasedDownsample"] = "DealiasedDownsample"
+    pooling: int = 2
+    resample_filter: Sequence[float] = dataclasses.field(
+        default_factory=lambda: [1.0, 2.0, 1.0]
+    )
+
+    def downsample_spatial_factor(self) -> int:
+        return self.pooling
+
+    def build(
+        self,
+        *,
+        in_channels: int | None = None,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        if in_channels is None:
+            raise ValueError(
+                "DealiasedDownsample requires in_channels to be passed to build()"
+            )
+        layer_ctx = ctx or HEALPixLayerBuildContext()
+        return DealiasedDownsample(
+            in_channels=in_channels,
+            resample_filter=self.resample_filter,
+            stride=self.pooling,
+            hpx_padding_mode=layer_ctx.hpx_padding_mode,
+            nside=layer_ctx.nside,
+        )
+
+
+DownsamplingBlockConfig = (
+    MaxPoolDownsamplingBlockConfig
+    | AvgPoolDownsamplingBlockConfig
+    | DealiasedDownsampleBlockConfig
+)
+
+
+@dataclasses.dataclass
+class TransposedConvUpsampleBlockConfig:
+    """Configuration for transpose-convolution upsampling."""
+
+    block_type: Literal["TransposedConvUpsample"] = "TransposedConvUpsample"
+    stride: int = 2
+    activation: Optional[CappedGELUConfig] = None
+
+    def build(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        layer_ctx = ctx or HEALPixLayerBuildContext()
+        return TransposedConvUpsample(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            upsampling=self.stride,
+            activation=self.activation,
+            hpx_padding_mode=layer_ctx.hpx_padding_mode,
+            nside=layer_ctx.nside,
+        )
+
+
+@dataclasses.dataclass
+class SmoothedInterpolateConvBlockConfig:
+    """Configuration for smoothed interpolate + conv upsampling."""
+
+    block_type: Literal["SmoothedInterpolateConv"] = "SmoothedInterpolateConv"
     stride: int = 2
     kernel_size: int = 3
     dilation: int = 1
     upsample_mode: str = "nearest"
     activation: Optional[CappedGELUConfig] = None
-    enable_nhwc: bool = False
-    hpx_padding_mode: str = "earth2grid"
-    nside: Optional[int] = None
-    align_corners: bool = False
-    scale_factor: Optional[int] = None
-    mode: Optional[str] = None
 
-    def __post_init__(self) -> None:
-        if self.scale_factor is not None:
-            self.stride = self.scale_factor
-        if self.mode is not None:
-            self.upsample_mode = self.mode
-
-    def build(self) -> nn.Module:
-        if self.block_type == "TransposedConvUpsample":
-            return TransposedConvUpsample(
-                in_channels=self.in_channels,
-                out_channels=self.out_channels,
-                upsampling=self.stride,
-                activation=self.activation,
-                enable_nhwc=self.enable_nhwc,
-                hpx_padding_mode=self.hpx_padding_mode,
-                nside=self.nside,
-            )
-        if self.block_type == "SmoothedInterpolateConv":
-            return SmoothedInterpolateConv(
-                in_channels=self.in_channels,
-                out_channels=self.out_channels,
-                kernel_size=self.kernel_size,
-                dilation=self.dilation,
-                scale_factor=self.stride,
-                mode=self.upsample_mode,
-                activation=self.activation.build() if self.activation else None,
-                enable_nhwc=self.enable_nhwc,
-                hpx_padding_mode=self.hpx_padding_mode,
-                nside=self.nside,
-            )
-        if self.block_type == "Interpolate":
-            if self.align_corners is False:
-                return nn.Upsample(
-                    scale_factor=self.stride,
-                    mode=self.upsample_mode,
-                )
-            return nn.Upsample(
-                scale_factor=self.stride,
-                mode=self.upsample_mode,
-                align_corners=self.align_corners,
-            )
-        raise ValueError(f"Unsupported block type: {self.block_type}")
+    def build(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        layer_ctx = ctx or HEALPixLayerBuildContext()
+        return SmoothedInterpolateConv(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=self.kernel_size,
+            dilation=self.dilation,
+            scale_factor=self.stride,
+            mode=self.upsample_mode,
+            activation=self.activation.build() if self.activation else None,
+            hpx_padding_mode=layer_ctx.hpx_padding_mode,
+            nside=layer_ctx.nside,
+            nside_after=layer_ctx.nside_after,
+        )
 
 
 @dataclasses.dataclass
-class ConvBlockConfig:
-    """Configuration for convolutional residual / ConvNeXt style blocks (no spatial resample)."""
+class InterpolateUpsampleBlockConfig:
+    """Configuration for pure ``nn.Upsample`` upsampling (no conv)."""
 
-    in_channels: int = 3
-    out_channels: int = 1
+    block_type: Literal["Interpolate"] = "Interpolate"
+    stride: int = 2
+    upsample_mode: str = "nearest"
+    align_corners: bool = False
+
+    def build(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        del in_channels, out_channels, ctx
+        if self.align_corners is False:
+            return nn.Upsample(
+                scale_factor=self.stride,
+                mode=self.upsample_mode,
+            )
+        return nn.Upsample(
+            scale_factor=self.stride,
+            mode=self.upsample_mode,
+            align_corners=self.align_corners,
+        )
+
+
+UpsamplingBlockConfig = (
+    TransposedConvUpsampleBlockConfig
+    | SmoothedInterpolateConvBlockConfig
+    | InterpolateUpsampleBlockConfig
+)
+
+
+@dataclasses.dataclass
+class BasicConvBlockConfig:
+    """Configuration for stacked basic conv blocks."""
+
+    block_type: Literal["BasicConvBlock"] = "BasicConvBlock"
     kernel_size: int = 3
-    dilation: int = 1
+    n_layers: int = 1
+    activation: Optional[CappedGELUConfig] = None
+
+    def build(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        latent_channels: int | None = None,
+        dilation: int = 1,
+        n_layers: int | None = None,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        layer_ctx = ctx or HEALPixLayerBuildContext()
+        n_layers_resolved = self.n_layers if n_layers is None else n_layers
+        return BasicConvBlock(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=self.kernel_size,
+            dilation=dilation,
+            n_layers=n_layers_resolved,
+            latent_channels=latent_channels,
+            activation=self.activation,
+            hpx_padding_mode=layer_ctx.hpx_padding_mode,
+            nside=layer_ctx.nside,
+        )
+
+
+@dataclasses.dataclass
+class ConvNeXtBlockConfig:
+    """Configuration for a single ConvNeXt block."""
+
+    block_type: Literal["ConvNeXtBlock"] = "ConvNeXtBlock"
+    kernel_size: int = 3
+    upscale_factor: int = 4
+    activation: Optional[CappedGELUConfig] = None
+
+    def build(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        latent_channels: int | None = None,
+        dilation: int = 1,
+        n_layers: int | None = None,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        del n_layers
+        layer_ctx = ctx or HEALPixLayerBuildContext()
+        if latent_channels is None:
+            latent_channels = 1
+        return ConvNeXtBlock(
+            in_channels=in_channels,
+            latent_channels=latent_channels,
+            out_channels=out_channels,
+            kernel_size=self.kernel_size,
+            dilation=dilation,
+            upscale_factor=self.upscale_factor,
+            activation=self.activation,
+            hpx_padding_mode=layer_ctx.hpx_padding_mode,
+            nside=layer_ctx.nside,
+        )
+
+
+@dataclasses.dataclass
+class SymmetricConvNeXtBlockConfig:
+    """Configuration for a single symmetric ConvNeXt block."""
+
+    block_type: Literal["SymmetricConvNeXtBlock"] = "SymmetricConvNeXtBlock"
+    kernel_size: int = 3
+    upscale_factor: int = 4
+    activation: Optional[CappedGELUConfig] = None
+
+    def build(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        latent_channels: int | None = None,
+        dilation: int = 1,
+        n_layers: int | None = None,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        del n_layers
+        layer_ctx = ctx or HEALPixLayerBuildContext()
+        if latent_channels is None:
+            latent_channels = 1
+        return SymmetricConvNeXtBlock(
+            in_channels=in_channels,
+            latent_channels=latent_channels,
+            out_channels=out_channels,
+            kernel_size=self.kernel_size,
+            dilation=dilation,
+            upscale_factor=self.upscale_factor,
+            activation=self.activation,
+            hpx_padding_mode=layer_ctx.hpx_padding_mode,
+            nside=layer_ctx.nside,
+        )
+
+
+@dataclasses.dataclass
+class MultiSymmetricConvNeXtBlockConfig:
+    """Configuration for a stack of symmetric ConvNeXt blocks."""
+
+    block_type: Literal["Multi_SymmetricConvNeXtBlock"] = "Multi_SymmetricConvNeXtBlock"
+    kernel_size: int = 3
     n_layers: int = 1
     upscale_factor: int = 4
-    latent_channels: Optional[int] = None
     activation: Optional[CappedGELUConfig] = None
-    enable_nhwc: bool = False
-    hpx_padding_mode: str = "earth2grid"
-    nside: Optional[int] = None
-    block_type: Literal[
-        "BasicConvBlock",
-        "ConvNeXtBlock",
-        "SymmetricConvNeXtBlock",
-        "Multi_SymmetricConvNeXtBlock",
-    ] = "BasicConvBlock"
 
-    def build(self) -> nn.Module:
-        if self.block_type == "BasicConvBlock":
-            return BasicConvBlock(
-                in_channels=self.in_channels,
-                out_channels=self.out_channels,
-                kernel_size=self.kernel_size,
-                dilation=self.dilation,
-                n_layers=self.n_layers,
-                latent_channels=self.latent_channels,
-                activation=self.activation,
-                enable_nhwc=self.enable_nhwc,
-                hpx_padding_mode=self.hpx_padding_mode,
-                nside=self.nside,
-            )
-        if self.block_type == "ConvNeXtBlock":
-            if self.latent_channels is None:
-                self.latent_channels = 1
-            return ConvNeXtBlock(
-                in_channels=self.in_channels,
-                latent_channels=cast(int, self.latent_channels),
-                out_channels=self.out_channels,
-                kernel_size=self.kernel_size,
-                dilation=self.dilation,
-                upscale_factor=self.upscale_factor,
-                activation=self.activation,
-                enable_nhwc=self.enable_nhwc,
-                hpx_padding_mode=self.hpx_padding_mode,
-                nside=self.nside,
-            )
-        if self.block_type == "SymmetricConvNeXtBlock":
-            if self.latent_channels is None:
-                self.latent_channels = 1
-            return SymmetricConvNeXtBlock(
-                in_channels=self.in_channels,
-                latent_channels=cast(int, self.latent_channels),
-                out_channels=self.out_channels,
-                kernel_size=self.kernel_size,
-                dilation=self.dilation,
-                upscale_factor=self.upscale_factor,
-                activation=self.activation,
-                enable_nhwc=self.enable_nhwc,
-                hpx_padding_mode=self.hpx_padding_mode,
-                nside=self.nside,
-            )
-        if self.block_type == "Multi_SymmetricConvNeXtBlock":
-            if self.latent_channels is None:
-                self.latent_channels = 1
-            return Multi_SymmetricConvNeXtBlock(
-                in_channels=self.in_channels,
-                latent_channels=cast(int, self.latent_channels),
-                out_channels=self.out_channels,
-                kernel_size=self.kernel_size,
-                dilation=self.dilation,
-                upscale_factor=self.upscale_factor,
-                n_layers=self.n_layers,
-                activation=self.activation,
-                enable_nhwc=self.enable_nhwc,
-                hpx_padding_mode=self.hpx_padding_mode,
-                nside=self.nside,
-            )
-        raise ValueError(f"Unsupported block type: {self.block_type}")
+    def build(
+        self,
+        in_channels: int,
+        out_channels: int,
+        *,
+        latent_channels: int | None = None,
+        dilation: int = 1,
+        n_layers: int | None = None,
+        ctx: HEALPixLayerBuildContext | None = None,
+    ) -> nn.Module:
+        layer_ctx = ctx or HEALPixLayerBuildContext()
+        n_layers_resolved = self.n_layers if n_layers is None else n_layers
+        if latent_channels is None:
+            latent_channels = 1
+        return Multi_SymmetricConvNeXtBlock(
+            in_channels=in_channels,
+            latent_channels=latent_channels,
+            out_channels=out_channels,
+            kernel_size=self.kernel_size,
+            dilation=dilation,
+            upscale_factor=self.upscale_factor,
+            n_layers=n_layers_resolved,
+            activation=self.activation,
+            hpx_padding_mode=layer_ctx.hpx_padding_mode,
+            nside=layer_ctx.nside,
+        )
+
+
+ConvBlockConfig = (
+    BasicConvBlockConfig
+    | ConvNeXtBlockConfig
+    | SymmetricConvNeXtBlockConfig
+    | MultiSymmetricConvNeXtBlockConfig
+)
 
 
 # --- Downsampling modules ---
@@ -267,18 +421,37 @@ class MaxPool(nn.Module):
     def __init__(
         self,
         pooling: int = 2,
-        enable_nhwc: bool = False,
-        hpx_padding_mode: str = "earth2grid",
+        hpx_padding_mode: Literal[
+            "earth2grid", "karlbauer", "isolatitude"
+        ] = "earth2grid",
         nside: Optional[int] = None,
     ):
+        """
+        Args:
+            pooling: ``MaxPool2d`` kernel size (and stride).
+            hpx_padding_mode: HEALPix padding backend passed to ``HEALPixLayer``.
+            nside: Native face height/width for HEALPix padding.
+        """
         super().__init__()
         self.maxpool = HEALPixLayer(
             layer=nn.MaxPool2d,
             kernel_size=pooling,
-            **_healpix_layer_kwargs(enable_nhwc, hpx_padding_mode, nside),
+            **_healpix_layer_kwargs(
+                HEALPixLayerBuildContext(
+                    hpx_padding_mode=hpx_padding_mode,
+                    nside=nside,
+                )
+            ),
         )
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor ``[N * 12, C, H, W]``.
+
+        Returns:
+            Pooled tensor with halved spatial size per pooling factor.
+        """
         return self.maxpool(x)
 
 
@@ -288,18 +461,37 @@ class AvgPool(nn.Module):
     def __init__(
         self,
         pooling: int = 2,
-        enable_nhwc: bool = False,
-        hpx_padding_mode: str = "earth2grid",
+        hpx_padding_mode: Literal[
+            "earth2grid", "karlbauer", "isolatitude"
+        ] = "earth2grid",
         nside: Optional[int] = None,
     ):
+        """
+        Args:
+            pooling: ``AvgPool2d`` kernel size (and stride).
+            hpx_padding_mode: HEALPix padding backend passed to ``HEALPixLayer``.
+            nside: Native face height/width for HEALPix padding.
+        """
         super().__init__()
         self.avgpool = HEALPixLayer(
             layer=nn.AvgPool2d,
             kernel_size=pooling,
-            **_healpix_layer_kwargs(enable_nhwc, hpx_padding_mode, nside),
+            **_healpix_layer_kwargs(
+                HEALPixLayerBuildContext(
+                    hpx_padding_mode=hpx_padding_mode,
+                    nside=nside,
+                )
+            ),
         )
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor ``[N * 12, C, H, W]``.
+
+        Returns:
+            Pooled tensor with halved spatial size per pooling factor.
+        """
         return self.avgpool(x)
 
 
@@ -309,8 +501,8 @@ class DealiasBlurConv2d(nn.Module):
     @staticmethod
     def _normalized_depthwise_blur_weights(
         resample_filter: Sequence[float], in_channels: int
-    ) -> th.Tensor:
-        f = th.as_tensor(list(resample_filter), dtype=th.float32)
+    ) -> torch.Tensor:
+        f = torch.as_tensor(list(resample_filter), dtype=torch.float32)
         if f.ndim != 1:
             raise ValueError("resample_filter must be 1D")
         m = int(f.numel())
@@ -322,10 +514,19 @@ class DealiasBlurConv2d(nn.Module):
         self,
         in_channels: int,
         stride: int = 1,
-        resample_filter: Sequence[float] = (1.0, 2.0, 1.0),
+        resample_filter: Sequence[float] | None = None,
         **kwargs,
     ):
+        """
+        Args:
+            in_channels: Number of input channels (depthwise groups).
+            stride: Stride of the depthwise blur convolution.
+            resample_filter: 1D separable filter weights used to build the 2D kernel.
+            **kwargs: Accepted for API compatibility; not used.
+        """
         super().__init__()
+        if resample_filter is None:
+            resample_filter = [1.0, 2.0, 1.0]
         filt = tuple(float(x) for x in resample_filter)
         if len(filt) < 1:
             raise ValueError("resample_filter must be non-empty")
@@ -339,8 +540,15 @@ class DealiasBlurConv2d(nn.Module):
             self._normalized_depthwise_blur_weights(filt, in_channels),
         )
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        return th.nn.functional.conv2d(
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor ``[N, C, H, W]``.
+
+        Returns:
+            Depthwise-blurred tensor with optional strided downsampling.
+        """
+        return torch.nn.functional.conv2d(
             x,
             self.weight.to(device=x.device, dtype=x.dtype),
             bias=None,
@@ -356,13 +564,24 @@ class DealiasedDownsample(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,
-        resample_filter: Sequence[float] = (1.0, 2.0, 1.0),
+        resample_filter: Sequence[float] | None = None,
         stride: int = 2,
-        enable_nhwc: bool = False,
-        hpx_padding_mode: str = "earth2grid",
+        hpx_padding_mode: Literal[
+            "earth2grid", "karlbauer", "isolatitude"
+        ] = "earth2grid",
         nside: Optional[int] = None,
     ):
+        """
+        Args:
+            in_channels: Number of input channels.
+            resample_filter: 1D filter weights for each blur stage.
+            stride: Total downsampling factor (must be a power of two).
+            hpx_padding_mode: HEALPix padding backend passed to ``HEALPixLayer``.
+            nside: Native face height/width for HEALPix padding.
+        """
         super().__init__()
+        if resample_filter is None:
+            resample_filter = [1.0, 2.0, 1.0]
         filt = tuple(float(x) for x in resample_filter)
         m = len(filt)
         if m < 1:
@@ -374,10 +593,11 @@ class DealiasedDownsample(nn.Module):
 
         n_layers = int(math.log2(stride))
         pool_layers = []
-        hpk = _healpix_layer_kwargs(
-            enable_nhwc,
-            hpx_padding_mode,
-            nside,
+        healpix_kwargs = _healpix_layer_kwargs(
+            HEALPixLayerBuildContext(
+                hpx_padding_mode=hpx_padding_mode,
+                nside=nside,
+            )
         )
         for _ in range(n_layers):
             pool_layers.append(
@@ -392,13 +612,20 @@ class DealiasedDownsample(nn.Module):
                     bias=False,
                     dilation=1,
                     resample_filter=filt,
-                    **hpk,
+                    **healpix_kwargs,
                 )
             )
 
         self.pool = nn.Sequential(*pool_layers)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor ``[N * 12, C, H, W]``.
+
+        Returns:
+            Dealiased downsampled tensor.
+        """
         return self.pool(x)
 
 
@@ -418,8 +645,9 @@ class TransposedConvUpsample(nn.Module):
         out_channels: int = 1,
         upsampling: int = 2,
         activation: Optional[CappedGELUConfig] = None,
-        enable_nhwc: bool = False,
-        hpx_padding_mode: str = "earth2grid",
+        hpx_padding_mode: Literal[
+            "earth2grid", "karlbauer", "isolatitude"
+        ] = "earth2grid",
         nside: Optional[int] = None,
     ):
         """
@@ -428,8 +656,8 @@ class TransposedConvUpsample(nn.Module):
             out_channels: The number of output channels.
             upsampling: Stride size that will be used for upsampling.
             activation: ModuleConfig for the activation function used in upsampling.
-            enable_nhwc: Enable nhwc format, passed to wrapper.
             hpx_padding_mode: HEALPix padding backend passed to wrapper.
+            nside: Native face height/width for HEALPix padding.
         """
         super().__init__()
         upsampler = []
@@ -443,9 +671,10 @@ class TransposedConvUpsample(nn.Module):
                 stride=upsampling,
                 padding=0,
                 **_healpix_layer_kwargs(
-                    enable_nhwc,
-                    hpx_padding_mode,
-                    nside,
+                    HEALPixLayerBuildContext(
+                        hpx_padding_mode=hpx_padding_mode,
+                        nside=nside,
+                    )
                 ),
             )
         )
@@ -460,7 +689,7 @@ class TransposedConvUpsample(nn.Module):
             x: The values to upsample.
 
         Returns:
-            th.Tensor: The upsampled values.
+            torch.Tensor: The upsampled values.
         """
         return self.upsampler(x)
 
@@ -475,33 +704,48 @@ class SmoothedInterpolate(nn.Module):
         mode: str = "nearest",
         trim_size: int = 0,
     ):
+        """
+        Args:
+            in_channels: Number of channels for the depthwise smoother.
+            scale_factor: Interpolation scale factor.
+            mode: Interpolation mode passed to ``F.interpolate``.
+            trim_size: Border pixels to crop after smoothing (removes edge artifacts).
+        """
         super().__init__()
 
         self.in_channels = in_channels
         self.scale_factor = scale_factor
         self.mode = mode
         self.trim_size = trim_size
-        self.interp = th.nn.functional.interpolate
 
-        self.smoother_kernel = th.tensor(
+        smoother_kernel = torch.tensor(
             [[0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]
         )
-        self.smoother_kernel = self.smoother_kernel.unsqueeze(0).unsqueeze(0)
-        self.smoother_kernel = self.smoother_kernel.repeat((in_channels, 1, 1, 1))
+        smoother_kernel = smoother_kernel.unsqueeze(0).unsqueeze(0)
+        smoother_kernel = smoother_kernel.repeat((in_channels, 1, 1, 1))
+        self.register_buffer("smoother_kernel", smoother_kernel)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        self.smoother_kernel = self.smoother_kernel.to(
-            device=x.device, dtype=x.dtype
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor ``[N, C, H, W]``.
+
+        Returns:
+            Upsampled and smoothed tensor, optionally trimmed.
+        """
+        x = torch.nn.functional.interpolate(
+            x, scale_factor=self.scale_factor, mode=self.mode
         )
 
-        x = self.interp(x, scale_factor=self.scale_factor, mode=self.mode)
-
-        x = th.nn.functional.conv2d(
-            x,
-            self.smoother_kernel,
-            padding=0,
-            groups=self.in_channels,
-        ) / 4
+        x = (
+            torch.nn.functional.conv2d(
+                x,
+                self.smoother_kernel,
+                padding=0,
+                groups=self.in_channels,
+            )
+            / 4
+        )
 
         if self.trim_size > 0:
             x = x[
@@ -525,26 +769,60 @@ class SmoothedInterpolateConv(nn.Module):
         scale_factor: int = 2,
         mode: str = "nearest",
         activation: Optional[nn.Module] = None,
-        enable_nhwc: bool = False,
-        hpx_padding_mode: str = "earth2grid",
+        hpx_padding_mode: Literal[
+            "earth2grid", "karlbauer", "isolatitude"
+        ] = "earth2grid",
         nside: Optional[int] = None,
+        nside_after: Optional[int] = None,
     ):
+        """
+        Args:
+            in_channels: Number of input channels.
+            out_channels: Number of output channels.
+            kernel_size: Convolution kernel size after interpolation.
+            dilation: Convolution dilation (must be 1 for HEALPix resize).
+            scale_factor: Interpolation scale factor.
+            mode: Interpolation mode for the smoothed upsample step.
+            activation: Optional activation module appended after the conv.
+            hpx_padding_mode: HEALPix padding backend passed to ``HEALPixLayer``.
+            nside: Face height/width before upsampling (isolatitude gather indices).
+            nside_after: Face height/width after upsampling for the conv step; required
+                when ``nside`` is set and ``hpx_padding_mode`` is ``"isolatitude"``.
+        """
         super().__init__()
         if dilation > 1:
             raise ValueError(
                 f"dilation > 1 is not supported for HEALPix resize convolutions, got {dilation}"
             )
+        if nside is not None and nside_after is None:
+            if hpx_padding_mode == "isolatitude":
+                raise ValueError(
+                    "SmoothedInterpolateConv requires nside_after when nside is set "
+                    'and hpx_padding_mode="isolatitude"'
+                )
+            nside_after = nside
+        if (
+            nside is not None
+            and nside_after is not None
+            and nside_after != nside * scale_factor
+        ):
+            raise ValueError(
+                f"nside_after ({nside_after}) must equal nside ({nside}) * "
+                f"scale_factor ({scale_factor})"
+            )
 
         trim_size = 1
-        hpk = _healpix_layer_kwargs(
-            enable_nhwc,
-            hpx_padding_mode,
-            nside,
+        healpix_kwargs = _healpix_layer_kwargs(
+            HEALPixLayerBuildContext(
+                hpx_padding_mode=hpx_padding_mode,
+                nside=nside,
+            )
         )
-        hpk_after = _healpix_layer_kwargs(
-            enable_nhwc,
-            hpx_padding_mode,
-            nside * scale_factor if nside is not None else None,
+        healpix_kwargs_after = _healpix_layer_kwargs(
+            HEALPixLayerBuildContext(
+                hpx_padding_mode=hpx_padding_mode,
+                nside=nside_after,
+            )
         )
 
         block = [
@@ -554,7 +832,7 @@ class SmoothedInterpolateConv(nn.Module):
                 scale_factor=scale_factor,
                 mode=mode,
                 trim_size=trim_size,
-                **hpk,
+                **healpix_kwargs,
             ),
             HEALPixLayer(
                 layer=nn.Conv2d,
@@ -562,7 +840,7 @@ class SmoothedInterpolateConv(nn.Module):
                 out_channels=out_channels,
                 kernel_size=kernel_size,
                 dilation=dilation,
-                **hpk_after,
+                **healpix_kwargs_after,
             ),
         ]
 
@@ -570,7 +848,14 @@ class SmoothedInterpolateConv(nn.Module):
             block.append(activation)
         self.block = nn.Sequential(*block)
 
-    def forward(self, x: th.Tensor) -> th.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor ``[N * 12, C, H, W]``.
+
+        Returns:
+            Upsampled convolved tensor.
+        """
         return self.block(x)
 
 
@@ -589,7 +874,6 @@ class BasicConvBlock(nn.Module):
         n_layers=1,
         latent_channels=None,
         activation=None,
-        enable_nhwc=False,
         hpx_padding_mode="earth2grid",
         nside=None,
     ):
@@ -602,8 +886,8 @@ class BasicConvBlock(nn.Module):
             n_layers: Number of convolutional layers.
             latent_channels: Number of latent channels.
             activation: ModuleConfig for activation function to use.
-            enable_nhwc: Enable nhwc format, passed to wrapper.
             hpx_padding_mode: HEALPix padding backend passed to wrapper.
+            nside: Native face height/width for HEALPix padding.
         """
         super().__init__()
         if latent_channels is None:
@@ -612,15 +896,16 @@ class BasicConvBlock(nn.Module):
         for n in range(n_layers):
             convblock.append(
                 HEALPixLayer(
-                    layer=th.nn.Conv2d,
+                    layer=torch.nn.Conv2d,
                     in_channels=in_channels if n == 0 else latent_channels,
                     out_channels=out_channels if n == n_layers - 1 else latent_channels,
                     kernel_size=kernel_size,
                     dilation=dilation,
                     **_healpix_layer_kwargs(
-                        enable_nhwc,
-                        hpx_padding_mode,
-                        nside,
+                        HEALPixLayerBuildContext(
+                            hpx_padding_mode=hpx_padding_mode,
+                            nside=nside,
+                        )
                     ),
                 )
             )
@@ -635,7 +920,7 @@ class BasicConvBlock(nn.Module):
             x: Inputs to the forward pass.
 
         Returns:
-            th.Tensor: Result of the forward pass.
+            torch.Tensor: Result of the forward pass.
         """
         return self.convblock(x)
 
@@ -661,8 +946,9 @@ class ConvNeXtBlock(nn.Module):
         dilation: int = 1,
         upscale_factor: int = 4,
         activation: Optional[CappedGELUConfig] = None,
-        enable_nhwc: bool = False,
-        hpx_padding_mode: str = "earth2grid",
+        hpx_padding_mode: Literal[
+            "earth2grid", "karlbauer", "isolatitude"
+        ] = "earth2grid",
         nside: Optional[int] = None,
     ):
         """
@@ -676,14 +962,15 @@ class ConvNeXtBlock(nn.Module):
             dilation: Dilation rate for convolutions.
             upscale_factor: Factor by which to upscale the number of latent channels.
             activation: Configuration for the activation function used between layers.
-            enable_nhwc: Whether to enable NHWC format.
             hpx_padding_mode: HEALPix padding backend passed to wrapper.
+            nside: Native face height/width for HEALPix padding.
         """
         super().__init__()
-        hpk = _healpix_layer_kwargs(
-            enable_nhwc,
-            hpx_padding_mode,
-            nside,
+        healpix_kwargs = _healpix_layer_kwargs(
+            HEALPixLayerBuildContext(
+                hpx_padding_mode=hpx_padding_mode,
+                nside=nside,
+            )
         )
 
         # Instantiate 1x1 conv to increase/decrease channel depth if necessary
@@ -691,23 +978,23 @@ class ConvNeXtBlock(nn.Module):
             self.skip_module = lambda x: x  # Identity-function required in forward pass
         else:
             self.skip_module = HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=in_channels,
                 out_channels=out_channels,
                 kernel_size=1,
-                **hpk,
+                **healpix_kwargs,
             )
         # Convolution block
         convblock = []
         # 3x3 convolution increasing channels
         convblock.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=in_channels,
                 out_channels=int(latent_channels * upscale_factor),
                 kernel_size=kernel_size,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -715,12 +1002,12 @@ class ConvNeXtBlock(nn.Module):
         # 3x3 convolution maintaining increased channels
         convblock.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels * upscale_factor),
                 out_channels=int(latent_channels * upscale_factor),
                 kernel_size=kernel_size,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -728,11 +1015,11 @@ class ConvNeXtBlock(nn.Module):
         # Linear postprocessing
         convblock.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels * upscale_factor),
                 out_channels=out_channels,
                 kernel_size=1,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         self.convblock = nn.Sequential(*convblock)
@@ -768,8 +1055,9 @@ class DoubleConvNeXtBlock(nn.Module):
         upscale_factor: int = 4,
         latent_channels: int = 1,
         activation: Optional[CappedGELUConfig] = None,
-        enable_nhwc: bool = False,
-        hpx_padding_mode: str = "earth2grid",
+        hpx_padding_mode: Literal[
+            "earth2grid", "karlbauer", "isolatitude"
+        ] = "earth2grid",
         nside: Optional[int] = None,
     ):
         """
@@ -783,14 +1071,15 @@ class DoubleConvNeXtBlock(nn.Module):
             upscale_factor: Factor by which to upscale the number of latent channels (default is 4).
             latent_channels: Number of latent channels used in the block (default is 1).
             activation: Configuration for the activation function used between layers (default is None).
-            enable_nhwc: Whether to enable NHWC format (default is False).
             hpx_padding_mode: HEALPix padding backend passed to wrapper.
+            nside: Native face height/width for HEALPix padding.
         """
         super().__init__()
-        hpk = _healpix_layer_kwargs(
-            enable_nhwc,
-            hpx_padding_mode,
-            nside,
+        healpix_kwargs = _healpix_layer_kwargs(
+            HEALPixLayerBuildContext(
+                hpx_padding_mode=hpx_padding_mode,
+                nside=nside,
+            )
         )
 
         if in_channels == int(latent_channels):
@@ -799,11 +1088,11 @@ class DoubleConvNeXtBlock(nn.Module):
             )  # Identity-function required in forward pass
         else:
             self.skip_module1 = HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=in_channels,
                 out_channels=int(latent_channels),
                 kernel_size=1,
-                **hpk,
+                **healpix_kwargs,
             )
         if out_channels == int(latent_channels):
             self.skip_module2 = (
@@ -811,11 +1100,11 @@ class DoubleConvNeXtBlock(nn.Module):
             )  # Identity-function required in forward pass
         else:
             self.skip_module2 = HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels),
                 out_channels=out_channels,
                 kernel_size=1,
-                **hpk,
+                **healpix_kwargs,
             )
 
         # 1st ConvNeXt block, the output of this one remains internal
@@ -823,12 +1112,12 @@ class DoubleConvNeXtBlock(nn.Module):
         # 3x3 convolution establishing latent channels channels
         convblock1.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=in_channels,
                 out_channels=int(latent_channels),
                 kernel_size=kernel_size,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -836,12 +1125,12 @@ class DoubleConvNeXtBlock(nn.Module):
         # 1x1 convolution establishing increased channels
         convblock1.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels),
                 out_channels=int(latent_channels * upscale_factor),
                 kernel_size=1,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -849,12 +1138,12 @@ class DoubleConvNeXtBlock(nn.Module):
         # 1x1 convolution returning to latent channels
         convblock1.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels * upscale_factor),
                 out_channels=int(latent_channels),
                 kernel_size=1,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -866,12 +1155,12 @@ class DoubleConvNeXtBlock(nn.Module):
         # 3x3 convolution establishing latent channels channels
         convblock2.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels),
                 out_channels=int(latent_channels),
                 kernel_size=kernel_size,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -879,12 +1168,12 @@ class DoubleConvNeXtBlock(nn.Module):
         # 1x1 convolution establishing increased channels
         convblock2.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels),
                 out_channels=int(latent_channels * upscale_factor),
                 kernel_size=1,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -892,12 +1181,12 @@ class DoubleConvNeXtBlock(nn.Module):
         # 1x1 convolution reducing to output channels
         convblock2.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels * upscale_factor),
                 out_channels=out_channels,
                 kernel_size=1,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -936,8 +1225,9 @@ class SymmetricConvNeXtBlock(nn.Module):
         dilation: int = 1,
         upscale_factor: int = 4,
         activation: Optional[CappedGELUConfig] = None,
-        enable_nhwc: bool = False,
-        hpx_padding_mode: str = "earth2grid",
+        hpx_padding_mode: Literal[
+            "earth2grid", "karlbauer", "isolatitude"
+        ] = "earth2grid",
         nside: Optional[int] = None,
     ):
         """
@@ -951,24 +1241,25 @@ class SymmetricConvNeXtBlock(nn.Module):
             upscale_factor: Upscale factor.
             latent_channels: Number of latent channels used in the block (default is 1).
             activation: Configuration for the activation function used between layers (default is None).
-            enable_nhwc: Whether to enable NHWC format (default is False).
             hpx_padding_mode: HEALPix padding backend passed to wrapper.
+            nside: Native face height/width for HEALPix padding.
         """
         super().__init__()
-        hpk = _healpix_layer_kwargs(
-            enable_nhwc,
-            hpx_padding_mode,
-            nside,
+        healpix_kwargs = _healpix_layer_kwargs(
+            HEALPixLayerBuildContext(
+                hpx_padding_mode=hpx_padding_mode,
+                nside=nside,
+            )
         )
         if in_channels == int(latent_channels):
             self.skip_module = lambda x: x  # Identity-function required in forward pass
         else:
             self.skip_module = HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=in_channels,
                 out_channels=out_channels,
                 kernel_size=1,
-                **hpk,
+                **healpix_kwargs,
             )
 
         # 1st ConvNeXt block, the output of this one remains internal
@@ -976,12 +1267,12 @@ class SymmetricConvNeXtBlock(nn.Module):
         # 3x3 convolution establishing latent channels channels
         convblock.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=in_channels,
                 out_channels=int(latent_channels),
                 kernel_size=kernel_size,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -989,12 +1280,12 @@ class SymmetricConvNeXtBlock(nn.Module):
         # 1x1 convolution establishing increased channels
         convblock.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels),
                 out_channels=int(latent_channels * upscale_factor),
                 kernel_size=1,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -1002,12 +1293,12 @@ class SymmetricConvNeXtBlock(nn.Module):
         # 1x1 convolution returning to latent channels
         convblock.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels * upscale_factor),
                 out_channels=int(latent_channels),
                 kernel_size=1,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -1015,12 +1306,12 @@ class SymmetricConvNeXtBlock(nn.Module):
         # 3x3 convolution from latent channels to latent channels
         convblock.append(
             HEALPixLayer(
-                layer=th.nn.Conv2d,
+                layer=torch.nn.Conv2d,
                 in_channels=int(latent_channels),
                 out_channels=out_channels,  # int(latent_channels),
                 kernel_size=kernel_size,
                 dilation=dilation,
-                **hpk,
+                **healpix_kwargs,
             )
         )
         if activation is not None:
@@ -1051,10 +1342,24 @@ class Multi_SymmetricConvNeXtBlock(nn.Module):
         upscale_factor: int = 4,
         n_layers: int = 1,
         activation: Optional[CappedGELUConfig] = None,
-        enable_nhwc: bool = False,
-        hpx_padding_mode: str = "earth2grid",
+        hpx_padding_mode: Literal[
+            "earth2grid", "karlbauer", "isolatitude"
+        ] = "earth2grid",
         nside: Optional[int] = None,
     ):
+        """
+        Args:
+            in_channels: Number of input channels (first block only).
+            latent_channels: Latent channel width inside each symmetric block.
+            out_channels: Number of output channels for every block.
+            kernel_size: Convolution kernel size.
+            dilation: Convolution dilation.
+            upscale_factor: Channel upscale factor inside each block.
+            n_layers: Number of stacked ``SymmetricConvNeXtBlock`` modules.
+            activation: Optional ``CappedGELUConfig`` between layers.
+            hpx_padding_mode: HEALPix padding backend passed to child blocks.
+            nside: Native face height/width for HEALPix padding.
+        """
         super().__init__()
         self.blocks = nn.ModuleList()
         for i in range(n_layers):
@@ -1068,13 +1373,19 @@ class Multi_SymmetricConvNeXtBlock(nn.Module):
                     dilation=dilation,
                     upscale_factor=upscale_factor,
                     activation=activation,
-                    enable_nhwc=enable_nhwc,
                     hpx_padding_mode=hpx_padding_mode,
                     nside=nside,
                 )
             )
 
     def forward(self, x):
+        """
+        Args:
+            x: Input tensor.
+
+        Returns:
+            Output after ``n_layers`` symmetric ConvNeXt blocks.
+        """
         out = x
         for block in self.blocks:
             out = block(out)
@@ -1095,10 +1406,9 @@ class Interpolate(nn.Module):
         """
         Args:
             scale_factor: Multiplier for spatial size, passed to `nn.functional.interpolate`.
-            mode, : Interpolation mode used for upsampling, passed to `nn.functional.interpolate`.
+            mode: Interpolation mode used for upsampling, passed to `nn.functional.interpolate`.
         """
         super().__init__()
-        self.interp = nn.functional.interpolate
         self.scale_factor = scale_factor
         self.mode = mode
 
@@ -1109,6 +1419,8 @@ class Interpolate(nn.Module):
             inputs: Inputs to interpolate.
 
         Returns:
-            th.Tensor: The interpolated values.
+            torch.Tensor: The interpolated values.
         """
-        return self.interp(inputs, scale_factor=self.scale_factor, mode=self.mode)
+        return nn.functional.interpolate(
+            inputs, scale_factor=self.scale_factor, mode=self.mode
+        )
