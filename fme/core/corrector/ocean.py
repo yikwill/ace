@@ -17,7 +17,7 @@ from fme.core.corrector.registry import (
     CorrectorConfigABC,
 )
 from fme.core.corrector.state import CorrectorState
-from fme.core.corrector.utils import ForcePositive
+from fme.core.corrector.utils import ForcePositive, replace_value_keep_gradient
 from fme.core.dataset_info import DatasetInfo
 from fme.core.gridded_ops import GriddedOperations
 from fme.core.ocean_data import HasOceanDepthIntegral, OceanData
@@ -55,12 +55,23 @@ class SeaIceFractionConfig:
     remove_negative_ocean_fraction: bool = True
 
     def __call__(
-        self, gen_data: TensorMapping, input_data: TensorMapping
+        self,
+        gen_data: TensorMapping,
+        input_data: TensorMapping,
+        keep_gradient: bool = False,
     ) -> TensorDict:
-        out = {**gen_data}
-        out[self.sea_ice_fraction_name] = torch.clamp(
-            out[self.sea_ice_fraction_name], min=0.0, max=1.0
-        )
+        """
+        Returns:
+            A ``TensorDict`` containing only the fields modified by this
+            correction (the sea ice fraction and the fields zeroed where
+            ice-free).
+        """
+        out: TensorDict = {}
+        sif = gen_data[self.sea_ice_fraction_name]
+        clamped_sif = torch.clamp(sif, min=0.0, max=1.0)
+        if keep_gradient:
+            clamped_sif = replace_value_keep_gradient(sif, clamped_sif)
+        out[self.sea_ice_fraction_name] = clamped_sif
         if self.remove_negative_ocean_fraction:
             negative_ocean_fraction = (
                 1
@@ -68,7 +79,12 @@ class SeaIceFractionConfig:
                 - input_data[self.land_fraction_name]
             )
             negative_ocean_fraction = negative_ocean_fraction.clip(max=0)
-            out[self.sea_ice_fraction_name] += negative_ocean_fraction
+            rebalanced_sif = out[self.sea_ice_fraction_name] + negative_ocean_fraction
+            if keep_gradient:
+                rebalanced_sif = replace_value_keep_gradient(
+                    out[self.sea_ice_fraction_name], rebalanced_sif
+                )
+            out[self.sea_ice_fraction_name] = rebalanced_sif
         for name in self.zero_where_ice_free_names:
             out[name] = gen_data[name] * (out[self.sea_ice_fraction_name] > 0.0)
         return out
@@ -126,9 +142,13 @@ class SeaIceFractionCorrection:
     Wraps ``SeaIceFractionConfig`` so the corrector applies the operation
     without reading config fields. ``forcing_data`` and ``corrector_state`` are
     unused and passed through.
+
+    If ``keep_gradient`` is True, the clamp and rebalance are applied with a
+    straight-through estimator so out-of-range cells still get a learning signal.
     """
 
     config: SeaIceFractionConfig
+    keep_gradient: bool = False
 
     def __call__(
         self,
@@ -137,7 +157,16 @@ class SeaIceFractionCorrection:
         forcing_data: TensorMapping,
         corrector_state: CorrectorState | None,
     ) -> tuple[TensorDict, CorrectorState | None]:
-        return self.config(gen_data, input_data), corrector_state
+        """
+        Returns:
+            A tuple whose ``TensorDict`` contains only the fields modified by
+            this correction (the sea ice fraction and the fields zeroed where
+            ice-free). ``SeaIceFractionConfig.__call__`` already returns only
+            those fields, preserving the straight-through estimator when
+            ``keep_gradient`` is set.
+        """
+        corrected = self.config(gen_data, input_data, keep_gradient=self.keep_gradient)
+        return corrected, corrector_state
 
 
 @dataclasses.dataclass
@@ -153,13 +182,18 @@ class SurfaceEnergyFluxCorrection:
         forcing_data: TensorMapping,
         corrector_state: CorrectorState | None,
     ) -> tuple[TensorDict, CorrectorState | None]:
-        gen_data = _correct_hfds(
+        """
+        Returns:
+            A tuple whose ``TensorDict`` contains only the field modified by this
+            correction (the net downward surface heat flux, ``hfds``).
+        """
+        corrected = _correct_hfds(
             input_data,
             gen_data,
             forcing_data,
             method=self.method,
         )
-        return gen_data, corrector_state
+        return corrected, corrector_state
 
 
 @dataclasses.dataclass
@@ -179,12 +213,18 @@ class OceanHeatContentCorrection:
         forcing_data: TensorMapping,
         corrector_state: CorrectorState | None,
     ) -> tuple[TensorDict, CorrectorState | None]:
+        """
+        Returns:
+            A tuple whose ``TensorDict`` contains only the fields modified by
+            this correction (the potential temperature at every depth level, and
+            the sea surface temperature when present).
+        """
         if self.vertical_coordinate is None:
             raise ValueError(
                 "Ocean heat content correction is turned on, but no vertical "
                 "coordinate is available."
             )
-        gen_data = _force_conserve_ocean_heat_content(
+        corrected = _force_conserve_ocean_heat_content(
             input_data,
             gen_data,
             forcing_data,
@@ -194,16 +234,37 @@ class OceanHeatContentCorrection:
             self.method,
             self.unaccounted_heating,
         )
-        return gen_data, corrector_state
+        return corrected, corrector_state
 
 
 @CorrectorSelector.register("ocean_corrector")
 @dataclasses.dataclass
 class OceanCorrectorConfig(CorrectorConfigABC):
+    """Configuration for corrections applied to generated ocean data.
+
+    Parameters:
+        force_positive_names: Names of fields that should be forced to be greater
+            than or equal to zero.
+        sea_ice_fraction_correction: Optional configuration for a sea-ice-fraction
+            correction (bounds sea_ice_fraction to 0-1 and keeps the land, ocean,
+            and sea-ice fractions summing to one).
+        surface_energy_flux_correction: Optional configuration for a surface energy
+            flux correction to the generated hfds.
+        ocean_heat_content_correction: Optional configuration for an ocean heat
+            content correction.
+        keep_gradient_through_clamps: If True, apply the corrector's hard clamps
+            (the ``force_positive_names`` clamp and the
+            ``sea_ice_fraction_correction`` bound/rebalance) with a straight-through
+            estimator: the forward value is still clamped, but gradient flows as if
+            the clamp had not happened, so out-of-range cells still get a learning
+            signal.
+    """
+
     force_positive_names: list[str] = dataclasses.field(default_factory=list)
     sea_ice_fraction_correction: SeaIceFractionConfig | None = None
     surface_energy_flux_correction: SurfaceEnergyFluxCorrectionConfig | None = None
     ocean_heat_content_correction: OceanHeatContentBudgetConfig | None = None
+    keep_gradient_through_clamps: bool = False
 
     @classmethod
     def remove_deprecated_keys(cls, state: Mapping[str, Any]) -> dict[str, Any]:
@@ -249,10 +310,18 @@ class OceanCorrectorConfig(CorrectorConfigABC):
         timestep_seconds = timestep.total_seconds()
         corrections: list[Correction] = []
         if len(self.force_positive_names) > 0:
-            corrections.append(ForcePositive(self.force_positive_names))
+            corrections.append(
+                ForcePositive(
+                    self.force_positive_names,
+                    keep_gradient=self.keep_gradient_through_clamps,
+                )
+            )
         if self.sea_ice_fraction_correction is not None:
             corrections.append(
-                SeaIceFractionCorrection(self.sea_ice_fraction_correction)
+                SeaIceFractionCorrection(
+                    self.sea_ice_fraction_correction,
+                    keep_gradient=self.keep_gradient_through_clamps,
+                )
             )
         if self.surface_energy_flux_correction is not None:
             corrections.append(
@@ -322,7 +391,7 @@ def _correct_hfds(
     net_flux = _compute_ocean_net_surface_energy_flux(
         forcing_data, input.sea_surface_temperature
     )
-    out = dict(gen_data)
+    out: TensorDict = {}
     if "hfds" in gen_data:
         hfds_name = "hfds"
     else:
@@ -405,12 +474,13 @@ def _force_conserve_ocean_heat_content(
         global_input_ocean_heat_content + expected_change_ocean_heat_content
     ) / global_gen_ocean_heat_content
     # apply same temperature correction to all vertical layers
+    out: TensorDict = {}
     n_levels = gen.sea_water_potential_temperature.shape[-1]
     for k in range(n_levels):
         name = f"thetao_{k}"
-        gen.data[name] = gen.data[name] * heat_content_correction_ratio
+        out[name] = gen.data[name] * heat_content_correction_ratio
     if "sst" in gen.data:
-        gen.data["sst"] = (  # assuming sst in Kelvin
+        out["sst"] = (  # assuming sst in Kelvin
             gen.data["sst"] - FREEZING_TEMPERATURE_KELVIN
         ) * heat_content_correction_ratio + FREEZING_TEMPERATURE_KELVIN
-    return gen.data
+    return out
