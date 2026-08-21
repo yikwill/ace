@@ -40,6 +40,7 @@ from fme.ace.stepper.single_module import (
     TrainOutput,
     TrainStepper,
     TrainStepperConfig,
+    _add_ar_input_noise,
     get_serialized_stepper_vertical_coordinate,
     load_stepper,
     load_stepper_config,
@@ -1440,6 +1441,197 @@ def test_input_dropout_inactive_in_inference():
     out_none = _run(None)
     for name in out_none:
         torch.testing.assert_close(out_dropout[name], out_none[name])
+
+
+def test_ar_input_noise_sigma_rejects_negative():
+    with pytest.raises(ValueError, match="ar_input_noise_sigma"):
+        TrainStepperConfig(ar_input_noise_sigma=-0.1)
+
+
+def test_add_ar_input_noise_scales_by_true_delta_and_skips():
+    """Helper applies σ·|Δ_true|·ε and honors skip_names."""
+    state = {
+        "a": torch.zeros(1, 2, 2),
+        "b": torch.zeros(1, 2, 2),
+    }
+    forcing = {
+        "a": torch.stack([torch.zeros(1, 2, 2), torch.ones(1, 2, 2)], dim=1),
+        "b": torch.stack([torch.zeros(1, 2, 2), 2.0 * torch.ones(1, 2, 2)], dim=1),
+    }
+    with patch(
+        "fme.ace.stepper.single_module.randn_like",
+        side_effect=lambda x: torch.ones_like(x),
+    ):
+        _add_ar_input_noise(
+            state,
+            forcing,
+            prognostic_names=["a", "b"],
+            step=0,
+            sigma=0.5,
+            skip_names={"a"},
+        )
+    torch.testing.assert_close(state["a"], torch.zeros(1, 2, 2))
+    # |Δ_b|=2, σ=0.5, ε=1 → noise = 1
+    torch.testing.assert_close(state["b"], torch.ones(1, 2, 2))
+
+
+def test_ar_input_noise_corrupts_next_step_input_not_yielded_output():
+    """Step-0 gen matches no-noise; step-1 network input is corrupted."""
+    n_steps = 2
+    sigma = 0.25
+    n_samples = 2
+    config = StepperConfig(
+        step=StepSelector(
+            type="single_module",
+            config=dataclasses.asdict(
+                SingleModuleStepConfig(
+                    builder=ModuleSelector(
+                        type="prebuilt", config={"module": _DummyParamModule()}
+                    ),
+                    in_names=["a"],
+                    out_names=["a"],
+                    normalization=trivial_network_and_loss_normalization(["a"]),
+                )
+            ),
+        ),
+    )
+
+    def _run(ar_input_noise_sigma: float | None):
+        torch.manual_seed(0)
+        stepper = _get_train_stepper(
+            config,
+            loss=StepLossConfig(type="MSE"),
+            n_forward_steps=n_steps,
+            ar_input_noise_sigma=ar_input_noise_sigma,
+        )
+        data = get_data(["a"], n_samples=n_samples, n_time=n_steps + 1).data
+        captured: list[torch.Tensor] = []
+
+        def _pre_hook(module, args):
+            captured.append(args[0].detach().clone())
+
+        handle = stepper.modules[0].register_forward_pre_hook(_pre_hook)
+        optimization = OptimizationConfig().build(
+            modules=list(stepper.modules), max_epochs=1
+        )
+        try:
+            with patch(
+                "fme.ace.stepper.single_module.randn_like",
+                side_effect=lambda x: torch.ones_like(x),
+            ):
+                out = stepper.train_on_batch(data, optimization=optimization)
+        finally:
+            handle.remove()
+        return out, captured, data
+
+    out_noise, caps_noise, data = _run(sigma)
+    out_clean, caps_clean, _ = _run(None)
+
+    assert len(caps_noise) == n_steps
+    torch.testing.assert_close(caps_noise[0], caps_clean[0])
+    # Step-0 gen (time index after IC prepend) matches; noise is post-yield.
+    torch.testing.assert_close(
+        out_noise.gen_data["a"][:, :, 1], out_clean.gen_data["a"][:, :, 1]
+    )
+    # Network input channel 0 at step 1 differs by σ·|Δ_true| with ε=1.
+    true_delta = (data.data["a"][:, 1] - data.data["a"][:, 0]).abs()
+    expected_shift = sigma * true_delta
+    actual_shift = (caps_noise[1][:, 0] - caps_clean[1][:, 0]).cpu()
+    torch.testing.assert_close(actual_shift, expected_shift.cpu())
+
+
+def test_ar_input_noise_call_count_skips_last_step():
+    n_steps = 3
+    config = StepperConfig(
+        step=StepSelector(
+            type="single_module",
+            config=dataclasses.asdict(
+                SingleModuleStepConfig(
+                    builder=ModuleSelector(
+                        type="prebuilt", config={"module": _DummyParamModule()}
+                    ),
+                    in_names=["a"],
+                    out_names=["a"],
+                    normalization=trivial_network_and_loss_normalization(["a"]),
+                )
+            ),
+        ),
+    )
+    stepper = _get_train_stepper(
+        config,
+        loss=StepLossConfig(type="MSE"),
+        n_forward_steps=n_steps,
+        ar_input_noise_sigma=0.1,
+    )
+    data = get_data(["a"], n_samples=2, n_time=n_steps + 1).data
+    optimization = OptimizationConfig().build(
+        modules=list(stepper.modules), max_epochs=1
+    )
+    with patch("fme.ace.stepper.single_module._add_ar_input_noise") as mock_noise:
+        stepper.train_on_batch(data, optimization=optimization)
+    assert mock_noise.call_count == n_steps - 1
+
+
+def test_ar_input_noise_inactive_in_eval_mode():
+    """NullOptimization puts modules in eval; AR noise must be a no-op."""
+    n_steps = 2
+
+    def _run(ar_input_noise_sigma: float | None):
+        torch.manual_seed(0)
+        stepper = _get_stepper(["a"], ["a"])
+        data = get_data(["a"], n_samples=3, n_time=n_steps + 1).data
+        train_stepper = _init_train_stepper(
+            stepper,
+            loss=StepLossConfig(type="MSE"),
+            n_forward_steps=n_steps,
+            ar_input_noise_sigma=ar_input_noise_sigma,
+        )
+        return train_stepper.train_on_batch(
+            data, optimization=NullOptimization()
+        ).gen_data
+
+    out_noise = _run(0.5)
+    out_none = _run(None)
+    for name in out_none:
+        torch.testing.assert_close(out_noise[name], out_none[name])
+
+
+def test_ar_input_noise_skips_ocean_sst():
+    """Ocean surface temperature is in skip_names passed to the helper."""
+    n_steps = 2
+    config = StepperConfig(
+        step=StepSelector(
+            type="single_module",
+            config=dataclasses.asdict(
+                SingleModuleStepConfig(
+                    builder=ModuleSelector(
+                        type="prebuilt", config={"module": _DummyParamModule()}
+                    ),
+                    in_names=["a", "mask"],
+                    out_names=["a"],
+                    normalization=trivial_network_and_loss_normalization(["a", "mask"]),
+                    ocean=OceanConfig("a", "mask"),
+                )
+            ),
+        ),
+    )
+    stepper = _get_train_stepper(
+        config,
+        loss=StepLossConfig(type="MSE"),
+        n_forward_steps=n_steps,
+        ar_input_noise_sigma=0.1,
+    )
+    data = get_data(["a", "mask"], n_samples=2, n_time=n_steps + 1).data
+    optimization = OptimizationConfig().build(
+        modules=list(stepper.modules), max_epochs=1
+    )
+    with patch("fme.ace.stepper.single_module._add_ar_input_noise") as mock_noise:
+        stepper.train_on_batch(data, optimization=optimization)
+    assert mock_noise.call_count == 1
+    skip_names = mock_noise.call_args.kwargs.get("skip_names")
+    if skip_names is None:
+        skip_names = mock_noise.call_args[0][5]
+    assert "a" in skip_names
 
 
 def test_step():

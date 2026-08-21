@@ -43,7 +43,7 @@ from fme.core.normalizer import (
 )
 from fme.core.ocean import OceanConfig
 from fme.core.optimization import NullOptimization
-from fme.core.rand import use_generator
+from fme.core.rand import randn_like, use_generator
 from fme.core.registry import CorrectorSelector, ModuleSelector
 from fme.core.spatial_masking import (
     NullSpatialMasking,
@@ -73,6 +73,30 @@ from fme.core.typing_ import EnsembleTensorDict, TensorDict, TensorMapping
 
 DEFAULT_TIMESTEP = datetime.timedelta(hours=6)
 DEFAULT_ENCODED_TIMESTEP = encode_timestep(DEFAULT_TIMESTEP)
+
+
+def _add_ar_input_noise(
+    state: TensorDict,
+    forcing_dict: TensorMapping,
+    prognostic_names: list[str],
+    step: int,
+    sigma: float,
+    skip_names: set[str],
+) -> None:
+    """Corrupt prognostic entries of ``state`` in physical units (in-place).
+
+    Noise std at each grid point is ``sigma * |x_true(t+Δt) - x_true(t)|``,
+    so ``sigma`` is a fraction of the true one-step increment. Only names
+    present in both ``state`` and ``forcing_dict`` are touched (training
+    passes the full batch as forcing; inference subsets to forcings only).
+    """
+    for name in prognostic_names:
+        if name in skip_names:
+            continue
+        if name not in state or name not in forcing_dict:
+            continue
+        true_delta = forcing_dict[name][:, step + 1] - forcing_dict[name][:, step]
+        state[name] = state[name] + sigma * true_delta.abs() * randn_like(true_delta)
 
 
 def load_weights_and_history(path: str | None) -> StepperWeightsAndHistory:
@@ -1130,8 +1154,33 @@ class Stepper:
         labels: BatchLabels | None,
         data_mask: TensorMapping | None = None,
         stepper_state: StepperState | None = None,
+        ar_input_noise_sigma: float | None = None,
     ) -> Generator[StepOutput, None, None]:
+        """
+        Predict multiple steps forward given initial condition and forcing data.
+
+        Args:
+            ic_dict: Initial condition tensors with a leading time dim of size
+                ``n_ic_timesteps``.
+            forcing_dict: Forcing (and, during training, target prognostic)
+                tensors with time length ``n_ic_timesteps + n_forward_steps``.
+            n_forward_steps: Number of forward steps to predict.
+            optimizer: Optimization context (checkpointing / detach).
+            labels: Batch labels.
+            data_mask: Optional per-variable presence masks.
+            stepper_state: Per-sample state threaded across steps.
+            ar_input_noise_sigma: If set and the module is in train mode, after
+                each yielded step (except the last) corrupt prognostic entries
+                of the carried state by ``sigma * |true Δ| * N(0,1)`` in
+                physical units so later AR steps see noisy inputs. Loss sees
+                the clean yielded output. ``None`` disables (default).
+        """
         state = {k: ic_dict[k].squeeze(self.TIME_DIM) for k in ic_dict}
+        skip_noise_names: set[str] = set()
+        sst_name = self.surface_temperature_name
+        if sst_name is not None:
+            skip_noise_names.add(sst_name)
+        noise_active = ar_input_noise_sigma is not None and self.modules[0].training
         for step in range(n_forward_steps):
             input_forcing = {
                 k: (
@@ -1165,6 +1214,23 @@ class Stepper:
             stepper_state = result.stepper_state
             yield result
             state = optimizer.detach_if_using_gradient_accumulation(state)
+            # Corrupt next-step inputs only: yield already happened, so loss
+            # scores the clean prediction. Skip the last step (no next input).
+            # Shallow-copy so we never mutate the yielded StepOutput mapping.
+            if (
+                noise_active
+                and step < n_forward_steps - 1
+                and ar_input_noise_sigma is not None
+            ):
+                state = dict(state)
+                _add_ar_input_noise(
+                    state,
+                    forcing_dict,
+                    self.prognostic_names,
+                    step,
+                    ar_input_noise_sigma,
+                    skip_noise_names,
+                )
 
     def predict(
         self,
@@ -1462,6 +1528,11 @@ class TrainStepperConfig:
             be less than or equal to the number of timesteps present
             in the training dataset samples.
         parameter_init: The parameter initialization configuration for fine-tuning.
+        ar_input_noise_sigma: If set, after each training AR step (except the
+            last) add physical-unit noise to prognostic state entries with std
+            ``sigma * |true one-step increment|`` at each grid point. Improves
+            robustness to autoregressive input error. Disabled when ``None``.
+            Not used at inference.
     """
 
     loss: StepLossConfig = dataclasses.field(default_factory=lambda: StepLossConfig())
@@ -1471,6 +1542,7 @@ class TrainStepperConfig:
     parameter_init: ParameterInitializationConfig = dataclasses.field(
         default_factory=lambda: ParameterInitializationConfig()
     )
+    ar_input_noise_sigma: float | None = None
 
     def __post_init__(self):
         if self.n_ensemble == -1:
@@ -1478,6 +1550,11 @@ class TrainStepperConfig:
                 self.n_ensemble = 2
             else:
                 self.n_ensemble = 1
+        if self.ar_input_noise_sigma is not None and self.ar_input_noise_sigma < 0:
+            raise ValueError(
+                "ar_input_noise_sigma must be >= 0 when set, "
+                f"got {self.ar_input_noise_sigma}"
+            )
 
     @property
     def n_forward_steps_schedule(self) -> TimeLengthSchedule | None:
@@ -1697,6 +1774,7 @@ class TrainStepper(
             labels=input_ensemble_data.labels,
             data_mask=forcing_ensemble_data.data_mask,
             stepper_state=input_ensemble_data.stepper_state,
+            ar_input_noise_sigma=self._config.ar_input_noise_sigma,
         )
         output_list: list[EnsembleTensorDict] = []
         output_iterator = iter(output_generator)
