@@ -33,6 +33,7 @@ from fme.core.generics.trainer import (
     count_parameters,
     epoch_checkpoint_enabled,
     inference_one_epoch,
+    trim_host_memory,
 )
 from fme.core.generics.validation import run_validation, run_validation_loop
 from fme.core.logging_utils import LoggingConfig
@@ -507,6 +508,11 @@ def get_trainer(
     "checkpoint_save_epochs",
     [None, Slice(start=2, stop=3), Slice(start=1, step=2)],
 )
+def test_trim_host_memory_runs():
+    """Epoch-boundary trim must not raise; on Linux it should log RSS."""
+    trim_host_memory()
+
+
 def test_trainer(tmp_path: str, checkpoint_save_epochs: Slice | None):
     config, trainer = get_trainer(tmp_path, checkpoint_save_epochs, max_epochs=4)
     trainer.train()
