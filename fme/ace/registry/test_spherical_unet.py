@@ -188,6 +188,23 @@ def test_builder_filter_bases():
     assert out.shape == (2, n_out, *IMG_SHAPE)
 
 
+def test_builder_passes_theta_cutoff_per_level():
+    n_in, n_out = 5, 3
+    dataset_info = _get_dataset_info()
+    cutoffs = [0.15, 0.25, 0.35]
+    module = _builder(theta_cutoff=cutoffs).build(n_in, n_out, dataset_info)
+    assert module.theta_cutoff == cutoffs
+
+
+def test_nc_builder_passes_theta_cutoff_per_level():
+    n_in, n_out = 5, 3
+    dataset_info = _get_dataset_info()
+    cutoffs = [0.12, None, 0.34]
+    module = _nc_builder(theta_cutoff=cutoffs).build(n_in, n_out, dataset_info)
+    assert isinstance(module, NoiseConditionedModel)
+    assert module.conditional_model.theta_cutoff == cutoffs
+
+
 def test_selector_filter_bases():
     n_in, n_out = 5, 3
     dataset_info = _get_dataset_info()

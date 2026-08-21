@@ -42,6 +42,7 @@ def _small_unet(
     filter_bases: list[DiscoBasisSpec] | None = None,
     downsampling_mode: str = "conv",
     upsampling_mode: str = "bilinear",
+    theta_cutoff: list[float | None] | None = None,
 ) -> SphericalUNet:
     return SphericalUNet(
         img_size=img_size,
@@ -56,6 +57,7 @@ def _small_unet(
         filter_bases=filter_bases,
         downsampling_mode=downsampling_mode,
         upsampling_mode=upsampling_mode,
+        theta_cutoff=theta_cutoff,
     )
 
 
@@ -227,3 +229,52 @@ def test_isotropic_morlet_conv_lat_flip_symmetry():
         torch.flip(out, dims=[lat_dim]),
         out_from_flipped,
     )
+
+
+def test_normalize_theta_cutoff_per_level():
+    from fme.core.models.spherical_unet import s2unet as s2unet_mod
+
+    assert s2unet_mod._normalize_theta_cutoff_per_level(None, 3) == [None, None, None]
+    assert s2unet_mod._normalize_theta_cutoff_per_level([0.1, None, 0.3], 3) == [
+        0.1,
+        None,
+        0.3,
+    ]
+    with pytest.raises(ValueError, match="num_blocks"):
+        s2unet_mod._normalize_theta_cutoff_per_level([0.1, 0.2], 3)
+    with pytest.raises(ValueError, match="positive"):
+        s2unet_mod._normalize_theta_cutoff_per_level([0.1, 0.0, 0.3], 3)
+
+
+def test_theta_cutoff_per_level_reaches_disco_convs():
+    """Each U-Net level's DISCO layers must receive that level's override."""
+    overrides: list[float | None] = [0.11, 0.22, 0.33]
+    model = _small_unet(theta_cutoff=overrides)
+    assert model.theta_cutoff == overrides
+
+    for i, dblock in enumerate(model.dblocks):
+        expected = overrides[i]
+        # conv downsample + ConvNeXt spatial convs at this level
+        disco = [m for m in dblock.modules() if isinstance(m, DiscreteContinuousConvS2)]
+        assert disco, f"expected DISCO layers in dblock {i}"
+        for layer in disco:
+            assert layer.theta_cutoff == expected
+
+    # ublocks are built deepest-first; still keyed by level index i
+    for ublock, expected in zip(reversed(list(model.ublocks)), overrides):
+        disco = [m for m in ublock.modules() if isinstance(m, DiscreteContinuousConvS2)]
+        # bilinear upsampling may have no DISCO in the upsample path
+        for layer in disco:
+            assert layer.theta_cutoff == expected
+
+
+def test_theta_cutoff_none_uses_heuristic_not_uniform():
+    """Default None must not force one cutoff across differently-resolved levels."""
+    model = _small_unet(theta_cutoff=None)
+    cutoffs = [
+        m.theta_cutoff
+        for m in model.modules()
+        if isinstance(m, DiscreteContinuousConvS2)
+    ]
+    assert cutoffs
+    assert len(set(cutoffs)) > 1

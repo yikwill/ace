@@ -72,6 +72,7 @@ def _build_spherical_unet(
     mlp_ratio: float = 2.0,
     layer_scale: bool = True,
     layer_scale_init: float = 0.1,
+    theta_cutoff: list[float | None] | None = None,
 ) -> SphericalUNet:
     return SphericalUNet(
         img_size=img_shape,
@@ -96,6 +97,7 @@ def _build_spherical_unet(
         mlp_ratio=mlp_ratio,
         layer_scale=layer_scale,
         layer_scale_init=layer_scale_init,
+        theta_cutoff=theta_cutoff,
     )
 
 
@@ -131,6 +133,9 @@ class SphericalUNetBuilder(ModuleConfig):
     mlp_ratio: float = 2.0
     layer_scale: bool = True
     layer_scale_init: float = 0.1
+    # Per U-Net level DISCO cutoff (same length as embed_dims). None / omitted
+    # entries use the kernel_shape/nlat heuristic at that level.
+    theta_cutoff: list[float | None] | None = None
 
     def build(
         self,
@@ -164,6 +169,7 @@ class SphericalUNetBuilder(ModuleConfig):
             mlp_ratio=self.mlp_ratio,
             layer_scale=self.layer_scale,
             layer_scale_init=self.layer_scale_init,
+            theta_cutoff=self.theta_cutoff,
         )
 
 
@@ -202,6 +208,9 @@ class NoiseConditionedSphericalUNetBuilder(ModuleConfig):
     noise_embed_dim: int = 256
     label_embed_dim: int = 0
     noise_type: Literal["isotropic", "gaussian"] = "gaussian"
+    # Per U-Net level DISCO cutoff (same length as embed_dims). None / omitted
+    # entries use the kernel_shape/nlat heuristic at that level.
+    theta_cutoff: list[float | None] | None = None
 
     def build(
         self,
@@ -239,6 +248,7 @@ class NoiseConditionedSphericalUNetBuilder(ModuleConfig):
             mlp_ratio=self.mlp_ratio,
             layer_scale=self.layer_scale,
             layer_scale_init=self.layer_scale_init,
+            theta_cutoff=self.theta_cutoff,
         )
         if self.noise_type == "isotropic" and self.noise_embed_dim > 0:
             inverse_sht = InverseRealSHT(*dataset_info.img_shape, grid=self.grid)
