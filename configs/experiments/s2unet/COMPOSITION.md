@@ -15,7 +15,7 @@ No inter-branch dependencies. Merge into `main` in any order.
 |--------|------|
 | `fix/inference-persistent-workers` | Inference DataLoader: `persistent_workers` only when `num_data_workers > 0` |
 | `fix/irfft-autograd` | Functional DC/Nyquist imag clearing in `fme/fft.py` (multi-step autograd) |
-| `feature/spherical-unet` | `SphericalUNet` / `NoiseConditionedSphericalUNet` model + ACE registry + tests |
+| `feature/spherical-unet` | `SphericalUNet` / `NoiseConditionedSphericalUNet` model + ACE registry + tests (includes optional DISCO `theta_cutoff`) |
 
 ## Exp-only (do not PR to main as-is)
 
