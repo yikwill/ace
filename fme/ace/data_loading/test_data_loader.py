@@ -173,6 +173,25 @@ def test_ensemble_loader(
     assert isinstance(data._vertical_coordinate, HybridSigmaPressureCoordinate)
 
 
+def test_only_train_loader_persists_forkserver_workers(tmp_path):
+    """Val workers must not stay alive during the train loop (host cgroup OOM)."""
+    _create_dataset_on_disk(tmp_path)
+    config = DataLoaderConfig(
+        dataset=XarrayDataConfig(data_path=str(tmp_path)),
+        batch_size=1,
+        num_data_workers=1,
+    )
+    requirements = DataRequirements(["foo"], 2)
+    train = get_gridded_data(
+        config, train=True, requirements=requirements, _force_forkserver=True
+    )
+    val = get_gridded_data(
+        config, train=False, requirements=requirements, _force_forkserver=True
+    )
+    assert train._loader._torch_loader.persistent_workers is True  # type: ignore
+    assert val._loader._torch_loader.persistent_workers is False  # type: ignore
+
+
 def test_ensemble_loader_n_samples(tmp_path, num_ensemble_members=3, n_samples=1):
     """Tests that the ensemble loader returns the correct number of samples
     when n_samples is set in config.
@@ -505,7 +524,12 @@ def test_loader_n_repeats_but_not_infer_timestep_error(tmp_path):
 
 @pytest.mark.parametrize(
     "num_data_workers, force_forkserver",
-    [(0, False), (3, False), pytest.param(3, True, marks=pytest.mark.medium_duration)],
+    [
+        (0, False),
+        (0, True),  # zarr/forkserver must not set persistent_workers
+        (3, False),
+        pytest.param(3, True, marks=pytest.mark.medium_duration),
+    ],
 )
 def test_inference_data_loader(tmp_path, num_data_workers: int, force_forkserver: bool):
     _create_dataset_on_disk(tmp_path, n_times=14)
@@ -537,6 +561,7 @@ def test_inference_data_loader(tmp_path, num_data_workers: int, force_forkserver
         initial_condition=initial_condition_requirements,
         _force_forkserver=force_forkserver,
     )
+    assert data._loader.persistent_workers is False  # type: ignore
     data_loader = data.loader
     batch_data = next(iter(data_loader))
     assert isinstance(batch_data, BatchData)
