@@ -1,0 +1,240 @@
+experiment_dir: FME_OUTPUT_DIR
+save_checkpoint: true
+validate_using_ema: true
+max_epochs: 50
+ema:
+  decay: 0.999
+log_train_every_n_batches: 10
+logging:
+  log_to_screen: true
+  log_to_wandb: true
+  log_to_file: true
+  project: ace-s2resnet
+  entity: yikwill-university-of-washington
+train_loader:
+  batch_size: 256
+  num_data_workers: 1
+  prefetch_factor: 1
+  dataset:
+    data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/fme-radiation-data/2025-03-14-vertically-resolved-1deg-c96-shield-som-increasing-co2-fme-dataset
+    file_pattern: increasing-CO2.zarr
+    engine: zarr
+    subset:
+      start_time: "2031-01-01T06:00:00"
+      stop_time: "2039-01-01T00:00:00"
+validation:
+  loader:
+    batch_size: 512
+    num_data_workers: 1
+    prefetch_factor: 1
+    dataset:
+      data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/fme-radiation-data/2025-03-14-vertically-resolved-1deg-c96-shield-som-increasing-co2-fme-dataset
+      file_pattern: increasing-CO2.zarr
+      engine: zarr
+      subset:
+        start_time: "2040-01-01T06:00:00"
+        stop_time: "2042-01-01T00:00:00"
+optimization:
+  use_gradient_accumulation: false
+  enable_automatic_mixed_precision: true
+  lr: 0.0001
+  optimizer_type: AdamW
+  kwargs:
+    weight_decay: 0.01
+stepper_training:
+  n_forward_steps: 1
+  loss:
+    type: MSE
+    weights:
+      tendency_of_air_temperature_due_to_longwave_heating_0: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_1: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_2: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_3: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_4: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_5: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_6: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_7: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_0: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_1: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_2: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_3: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_4: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_5: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_6: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_7: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quartered_co2_0: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quartered_co2_1: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quartered_co2_2: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quartered_co2_3: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quartered_co2_4: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quartered_co2_5: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quartered_co2_6: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quartered_co2_7: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quartered_co2_0: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quartered_co2_1: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quartered_co2_2: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quartered_co2_3: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quartered_co2_4: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quartered_co2_5: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quartered_co2_6: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quartered_co2_7: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quadrupled_co2_0: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quadrupled_co2_1: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quadrupled_co2_2: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quadrupled_co2_3: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quadrupled_co2_4: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quadrupled_co2_5: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quadrupled_co2_6: 1.0
+      tendency_of_air_temperature_due_to_longwave_heating_with_quadrupled_co2_7: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quadrupled_co2_0: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quadrupled_co2_1: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quadrupled_co2_2: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quadrupled_co2_3: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quadrupled_co2_4: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quadrupled_co2_5: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quadrupled_co2_6: 1.0
+      tendency_of_air_temperature_due_to_shortwave_heating_with_quadrupled_co2_7: 1.0
+      DLWRFsfc: 1.0
+      DSWRFsfc: 1.0
+      ULWRFsfc: 1.0
+      ULWRFtoa: 1.0
+      USWRFsfc: 1.0
+      USWRFtoa: 1.0
+      DLWRFsfc_with_quartered_co2: 1.0
+      DSWRFsfc_with_quartered_co2: 1.0
+      ULWRFsfc_with_quartered_co2: 1.0
+      ULWRFtoa_with_quartered_co2: 1.0
+      USWRFsfc_with_quartered_co2: 1.0
+      USWRFtoa_with_quartered_co2: 1.0
+      DLWRFsfc_with_quadrupled_co2: 1.0
+      DSWRFsfc_with_quadrupled_co2: 1.0
+      ULWRFsfc_with_quadrupled_co2: 1.0
+      ULWRFtoa_with_quadrupled_co2: 1.0
+      USWRFsfc_with_quadrupled_co2: 1.0
+      USWRFtoa_with_quadrupled_co2: 1.0
+stepper:
+  step:
+    type: multi_call
+    config:
+      include_multi_call_in_loss: true
+      config:
+        forcing_name: global_mean_co2
+        forcing_multipliers:
+          _with_quartered_co2: 0.25
+          _with_quadrupled_co2: 4.0
+        output_names:
+          - tendency_of_air_temperature_due_to_longwave_heating_0
+          - tendency_of_air_temperature_due_to_longwave_heating_1
+          - tendency_of_air_temperature_due_to_longwave_heating_2
+          - tendency_of_air_temperature_due_to_longwave_heating_3
+          - tendency_of_air_temperature_due_to_longwave_heating_4
+          - tendency_of_air_temperature_due_to_longwave_heating_5
+          - tendency_of_air_temperature_due_to_longwave_heating_6
+          - tendency_of_air_temperature_due_to_longwave_heating_7
+          - tendency_of_air_temperature_due_to_shortwave_heating_0
+          - tendency_of_air_temperature_due_to_shortwave_heating_1
+          - tendency_of_air_temperature_due_to_shortwave_heating_2
+          - tendency_of_air_temperature_due_to_shortwave_heating_3
+          - tendency_of_air_temperature_due_to_shortwave_heating_4
+          - tendency_of_air_temperature_due_to_shortwave_heating_5
+          - tendency_of_air_temperature_due_to_shortwave_heating_6
+          - tendency_of_air_temperature_due_to_shortwave_heating_7
+          - DLWRFsfc
+          - DSWRFsfc
+          - ULWRFsfc
+          - ULWRFtoa
+          - USWRFsfc
+          - USWRFtoa
+      wrapped_step:
+        type: single_module
+        config:
+          residual_prediction: false
+          builder:
+            type: NoiseConditionedSphericalResNet
+            config:
+              kernel_shape: [6, 6]
+              theta_cutoff: 0.05236 # ~3 degrees
+              embed_dim: 128
+              depth: 4
+              grid: legendre-gauss
+              noise_embed_dim: 0
+              path_drop_rate: 0.0
+              mlp_drop_rate: 0.0
+          normalization:
+            network:
+              global_means_path: /pscratch/sd/y/yikwill/datasets/fme-radiation-data-stats/increasing-CO2/centering.nc
+              global_stds_path: /pscratch/sd/y/yikwill/datasets/fme-radiation-data-stats/increasing-CO2/scaling-full-field.nc
+            residual:
+              global_means_path: /pscratch/sd/y/yikwill/datasets/fme-radiation-data-stats/increasing-CO2/centering.nc
+              global_stds_path: /pscratch/sd/y/yikwill/datasets/fme-radiation-data-stats/increasing-CO2/scaling-residual.nc
+          next_step_forcing_names:
+            - DSWRFtoa
+            - global_mean_co2
+          in_names:
+            - land_fraction
+            - ocean_fraction
+            - sea_ice_fraction
+            - DSWRFtoa
+            - HGTsfc
+            - PRESsfc
+            - surface_temperature
+            - TMP2m
+            - Q2m
+            - UGRD10m
+            - VGRD10m
+            - air_temperature_0
+            - air_temperature_1
+            - air_temperature_2
+            - air_temperature_3
+            - air_temperature_4
+            - air_temperature_5
+            - air_temperature_6
+            - air_temperature_7
+            - specific_total_water_0
+            - specific_total_water_1
+            - specific_total_water_2
+            - specific_total_water_3
+            - specific_total_water_4
+            - specific_total_water_5
+            - specific_total_water_6
+            - specific_total_water_7
+            - eastward_wind_0
+            - eastward_wind_1
+            - eastward_wind_2
+            - eastward_wind_3
+            - eastward_wind_4
+            - eastward_wind_5
+            - eastward_wind_6
+            - eastward_wind_7
+            - northward_wind_0
+            - northward_wind_1
+            - northward_wind_2
+            - northward_wind_3
+            - northward_wind_4
+            - northward_wind_5
+            - northward_wind_6
+            - northward_wind_7
+            - global_mean_co2
+          out_names:
+            - tendency_of_air_temperature_due_to_longwave_heating_0
+            - tendency_of_air_temperature_due_to_longwave_heating_1
+            - tendency_of_air_temperature_due_to_longwave_heating_2
+            - tendency_of_air_temperature_due_to_longwave_heating_3
+            - tendency_of_air_temperature_due_to_longwave_heating_4
+            - tendency_of_air_temperature_due_to_longwave_heating_5
+            - tendency_of_air_temperature_due_to_longwave_heating_6
+            - tendency_of_air_temperature_due_to_longwave_heating_7
+            - tendency_of_air_temperature_due_to_shortwave_heating_0
+            - tendency_of_air_temperature_due_to_shortwave_heating_1
+            - tendency_of_air_temperature_due_to_shortwave_heating_2
+            - tendency_of_air_temperature_due_to_shortwave_heating_3
+            - tendency_of_air_temperature_due_to_shortwave_heating_4
+            - tendency_of_air_temperature_due_to_shortwave_heating_5
+            - tendency_of_air_temperature_due_to_shortwave_heating_6
+            - tendency_of_air_temperature_due_to_shortwave_heating_7
+            - DLWRFsfc
+            - DSWRFsfc
+            - ULWRFsfc
+            - ULWRFtoa
+            - USWRFsfc
+            - USWRFtoa

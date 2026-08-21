@@ -1,0 +1,27 @@
+runs:
+  increasing-CO2: /global/cfs/projectdirs/e3sm/yikwill/datasets/fme-radiation-data/2025-03-14-vertically-resolved-1deg-c96-shield-som-increasing-co2-fme-dataset/increasing-CO2.zarr
+data_output_directory: /global/cfs/projectdirs/e3sm/yikwill/datasets/fme-radiation-data/2025-03-14-vertically-resolved-1deg-c96-shield-som-increasing-co2-fme-dataset
+stats:
+  output_directory: /pscratch/sd/y/yikwill/datasets/fme-radiation-data-stats-flux-chunks/chunk3
+  start_date: '2083-07-02T12:00:00'
+  end_date: null
+  data_type: FV3GFS
+  include_variables:
+  - DLWRFsfc
+  - DSWRFsfc
+  - ULWRFsfc
+  - ULWRFtoa
+  - USWRFsfc
+  - USWRFtoa
+  - DLWRFsfc_with_quartered_co2
+  - DSWRFsfc_with_quartered_co2
+  - ULWRFsfc_with_quartered_co2
+  - ULWRFtoa_with_quartered_co2
+  - USWRFsfc_with_quartered_co2
+  - USWRFtoa_with_quartered_co2
+  - DLWRFsfc_with_quadrupled_co2
+  - DSWRFsfc_with_quadrupled_co2
+  - ULWRFsfc_with_quadrupled_co2
+  - ULWRFtoa_with_quadrupled_co2
+  - USWRFsfc_with_quadrupled_co2
+  - USWRFtoa_with_quadrupled_co2
