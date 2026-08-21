@@ -122,6 +122,26 @@ def _resolve_theta_cutoff(
     return _compute_cutoff_radius(nlat, kernel_shape, basis_type)
 
 
+def _normalize_theta_cutoff_per_level(
+    theta_cutoff: list[float | None] | None,
+    num_blocks: int,
+) -> list[float | None]:
+    """Validate per-level DISCO cutoffs; ``None`` means heuristic at that level."""
+    if theta_cutoff is None:
+        return [None] * num_blocks
+    if len(theta_cutoff) != num_blocks:
+        raise ValueError(
+            f"theta_cutoff must have length num_blocks={num_blocks}, "
+            f"got {len(theta_cutoff)}"
+        )
+    for i, value in enumerate(theta_cutoff):
+        if value is not None and value <= 0.0:
+            raise ValueError(
+                f"theta_cutoff[{i}] must be positive when set, got {value}"
+            )
+    return list(theta_cutoff)
+
+
 def _default_context_config() -> SphericalUNetContextConfig:
     return SphericalUNetContextConfig()
 
@@ -480,6 +500,7 @@ class DownsamplingBlock(nn.Module):
         mlp_drop_rate: float = 0.0,
         layer_scale: bool = True,
         layer_scale_init: float = 0.1,
+        theta_cutoff: float | None = None,
     ):
         super().__init__()
         if context_config is None:
@@ -514,6 +535,7 @@ class DownsamplingBlock(nn.Module):
                 nlat_for_cutoff=in_shape[0],
                 layer_scale_init=layer_scale_init,
                 bias=False,
+                theta_cutoff=theta_cutoff,
             )
             process_shape = out_shape
             process_grid = grid_out
@@ -555,6 +577,7 @@ class DownsamplingBlock(nn.Module):
                     path_drop_rate=path_drop_rates[i],
                     layer_scale=layer_scale,
                     layer_scale_init=layer_scale_init,
+                    theta_cutoff=theta_cutoff,
                 )
             )
 
@@ -603,6 +626,7 @@ class UpsamplingBlock(nn.Module):
         mlp_drop_rate: float = 0.0,
         layer_scale: bool = True,
         layer_scale_init: float = 0.1,
+        theta_cutoff: float | None = None,
     ):
         super().__init__()
         if context_config is None:
@@ -648,6 +672,7 @@ class UpsamplingBlock(nn.Module):
                         nlat_for_cutoff=in_shape[0],
                         layer_scale_init=layer_scale_init,
                         bias=False,
+                        theta_cutoff=theta_cutoff,
                     ),
                     _make_disco_conv(
                         in_channels=out_channels,
@@ -661,6 +686,7 @@ class UpsamplingBlock(nn.Module):
                         nlat_for_cutoff=out_shape[0],
                         layer_scale_init=layer_scale_init,
                         bias=False,
+                        theta_cutoff=theta_cutoff,
                     ),
                     out_channels,
                     out_shape,
@@ -698,6 +724,7 @@ class UpsamplingBlock(nn.Module):
                     path_drop_rate=path_drop_rates[i],
                     layer_scale=layer_scale,
                     layer_scale_init=layer_scale_init,
+                    theta_cutoff=theta_cutoff,
                 )
             )
 
@@ -755,6 +782,7 @@ class SphericalUNet(nn.Module):
         mlp_ratio: float = 2.0,
         layer_scale: bool = True,
         layer_scale_init: float = 0.1,
+        theta_cutoff: list[float | None] | None = None,
     ):
         super().__init__()
 
@@ -782,6 +810,9 @@ class SphericalUNet(nn.Module):
         self.mlp_drop_rate = mlp_drop_rate
         self.layer_scale = layer_scale
         self.layer_scale_init = layer_scale_init
+        self.theta_cutoff = _normalize_theta_cutoff_per_level(
+            theta_cutoff, self.num_blocks
+        )
 
         if len(self.depths) != self.num_blocks:
             raise ValueError(
@@ -837,6 +868,7 @@ class SphericalUNet(nn.Module):
                     mlp_drop_rate=mlp_drop_rate,
                     layer_scale=layer_scale,
                     layer_scale_init=layer_scale_init,
+                    theta_cutoff=self.theta_cutoff[i],
                 )
             )
             out_shape = out_shape_new
@@ -878,6 +910,7 @@ class SphericalUNet(nn.Module):
                     mlp_drop_rate=mlp_drop_rate,
                     layer_scale=layer_scale,
                     layer_scale_init=layer_scale_init,
+                    theta_cutoff=self.theta_cutoff[i],
                 )
             )
 
