@@ -8,14 +8,16 @@ import os
 import shutil
 import tempfile
 import time
+from glob import glob
 from typing import Literal, Optional
 
 import click
 import dacite
 import fsspec
+import numpy as np
 import xarray as xr
 import yaml
-from fs_utils import is_local, makedirs, path_exists
+from xarray.coding.times import CFDatetimeCoder
 
 # these are auxiliary variables that exist in dataset for convenience, e.g. to do
 # masking or to more easily compute vertical integrals. But they are not inputs
@@ -45,18 +47,18 @@ DROP_VARIABLES = (
 DIMS = {
     "FV3GFS": ["time", "grid_xt", "grid_yt"],
     "E3SMV2": ["time", "lat", "lon"],
+    "E3SMV3": ["time", "lat", "lon"],
     "ERA5": ["time", "latitude", "longitude"],
     "CM4": ["time", "lat", "lon"],
-    "UFS_REPLAY": ["time", "lat", "lon"],
 }
 
-ClimateDataType = Literal["FV3GFS", "E3SMV2", "ERA5", "CM4", "UFS_REPLAY"]
+ClimateDataType = Literal["FV3GFS", "E3SMV2", "E3SMV3", "ERA5", "CM4"]
 
 
-def add_history_attrs(ds, input_zarr, start_date, end_date, n_samples):
+def add_history_attrs(ds, input_source, start_date, end_date, n_samples):
     ds.attrs["history"] = (
-        "Created by full-model/scripts/data_process/get_stats.py. INPUT_ZARR:"
-        f" {input_zarr}, START_DATE: {start_date}, END_DATE: {end_date}."
+        "Created by full-model/scripts/data_process/get_stats.py. INPUT:"
+        f" {input_source}, START_DATE: {start_date}, END_DATE: {end_date}."
     )
     ds.attrs["input_samples"] = n_samples
 
@@ -81,6 +83,8 @@ class StatsConfig:
     start_date: str | None = None
     end_date: str | None = None
     beaker_dataset: str | None = None
+    data_path: str | None = None
+    file_pattern: str | None = None
 
 
 @dataclasses.dataclass
@@ -91,36 +95,117 @@ class TimeCoarsenConfig:
     Attributes:
         data_output_directory: Directory to save the coarsened datasets as zarr stores.
         stats_output_directory: Directory to save the stats of the coarsened datasets.
-        factor: Factor by which the time dimension is coarsened.
-        beaker_dataset: Name of the Beaker dataset to create from the coarsened stats.
-            If None, the coarsened stats are not uploaded to Beaker.
     """
 
     data_output_directory: str
     stats_output_directory: str
-    factor: int
-    output_names: dict[str, str] = dataclasses.field(default_factory=dict)
-    beaker_dataset: str | None = None
 
 
 @dataclasses.dataclass
 class Config:
     runs: dict[str, str]
-    data_output_directory: str
     stats: StatsConfig
+    data_output_directory: str | None = None
     time_coarsen: TimeCoarsenConfig | None = None
+
+
+def _glob_paths(data_path: str, file_pattern: str) -> list[str]:
+    return sorted(glob(os.path.join(data_path, file_pattern)))
+
+
+def _filter_empty_netcdf_paths(paths: list[str]) -> list[str]:
+    kept = []
+    for path in paths:
+        with xr.open_dataset(path, decode_times=False, decode_timedelta=False) as ds:
+            if ds.sizes.get("time", 0) > 0:
+                kept.append(path)
+            else:
+                logging.info(f"Skipping NetCDF file with no timesteps: {path}")
+    return kept
+
+
+def _select_numeric_data_vars(ds: xr.Dataset) -> xr.Dataset:
+    numeric_vars = [
+        name for name in ds.data_vars if np.issubdtype(ds[name].dtype, np.number)
+    ]
+    dropped = set(ds.data_vars) - set(numeric_vars)
+    if dropped:
+        logging.info(f"Dropping non-numeric variables: {sorted(dropped)}")
+    return ds[numeric_vars]
+
+
+def _input_source(config: StatsConfig, input_zarr: str | None) -> str:
+    if config.data_path is not None:
+        return os.path.join(config.data_path, config.file_pattern or "")
+    if input_zarr is None:
+        raise ValueError("input_zarr is required when stats.data_path is not set.")
+    return input_zarr
+
+
+def _open_stats_input(
+    config: StatsConfig,
+    input_zarr: str | None,
+    dask,
+) -> xr.Dataset:
+    if config.data_path is not None:
+        if config.file_pattern is None:
+            raise ValueError(
+                "stats.file_pattern is required when stats.data_path is set."
+            )
+        paths = _glob_paths(config.data_path, config.file_pattern)
+        paths = _filter_empty_netcdf_paths(paths)
+        if not paths:
+            raise ValueError(
+                f"No files found matching {config.data_path}/{config.file_pattern}."
+            )
+        logging.info(
+            f"Opening {len(paths)} NetCDF files from "
+            f"{config.data_path}/{config.file_pattern}"
+        )
+        open_kwargs = {
+            "decode_times": CFDatetimeCoder(use_cftime=True),
+            "decode_timedelta": False,
+            "combine": "by_coords",
+            "compat": "override",
+            "data_vars": "minimal",
+            "coords": "minimal",
+        }
+        if dask is not None:
+            open_kwargs["chunks"] = {"time": "auto"}
+        open_start = time.time()
+        ds = xr.open_mfdataset(paths, **open_kwargs)
+        logging.info(
+            f"Opened {len(paths)} NetCDF files in {time.time() - open_start:0.2f}"
+            f" seconds."
+        )
+        return ds
+
+    if input_zarr is None:
+        raise ValueError("input_zarr is required when stats.data_path is not set.")
+    logging.info(f"Reading data from {input_zarr}")
+    # Open data with roughly 128 MiB chunks via dask's automatic chunking. This
+    # is useful when opening sharded zarr stores with an inner chunk size of 1,
+    # which is otherwise inefficient for the type of computation done here.
+    if dask is not None:
+        with dask.config.set({"array.chunk-size": "128MiB"}):
+            return xr.open_zarr(input_zarr, chunks={"time": "auto"})
+    return xr.open_zarr(input_zarr)
 
 
 def _out_dir_exists(out_dir: str) -> bool:
     """Check if the stats output directory already has results."""
-    return path_exists(os.path.join(out_dir, "centering.nc"))
+    if out_dir.startswith("gs:"):
+        fs = fsspec.filesystem("gs")
+        return fs.exists(out_dir + "/centering.nc")
+    else:
+        return os.path.exists(os.path.join(out_dir, "centering.nc"))
 
 
 def get_stats(
     config: StatsConfig,
-    input_zarr: str,
     out_dir: str,
     debug: bool,
+    input_zarr: str | None = None,
 ):
     if not debug and _out_dir_exists(out_dir):
         logging.info(f"Stats already exist at {out_dir}. Skipping.")
@@ -139,20 +224,13 @@ def get_stats(
         dask = None
 
     initial_time = time.time()
+    input_source = _input_source(config, input_zarr)
 
     xr.set_options(keep_attrs=True, display_max_rows=100)
-    logging.info(f"Reading data from {input_zarr}")
-
-    # Open data with roughly 128 MiB chunks via dask's automatic chunking. This
-    # is useful when opening sharded zarr stores with an inner chunk size of 1,
-    # which is otherwise inefficient for the type of computation done here.
-    if dask is not None:
-        with dask.config.set({"array.chunk-size": "128MiB"}):
-            ds = xr.open_zarr(input_zarr, chunks={"time": "auto"})
-    else:
-        ds = xr.open_zarr(input_zarr)
+    ds = _open_stats_input(config, input_zarr, dask)
 
     ds = ds.drop_vars(DROP_VARIABLES, errors="ignore")
+    ds = _select_numeric_data_vars(ds)
     ds = ds.sel(time=slice(config.start_date, config.end_date))
 
     dims = DIMS[config.data_type]
@@ -179,7 +257,7 @@ def get_stats(
         n_samples = len(ds.time)
         add_history_attrs(
             dataset,
-            input_zarr,
+            input_source,
             config.start_date,
             config.end_date,
             n_samples,
@@ -191,19 +269,29 @@ def get_stats(
         logging.info(
             f"Standard deviation of normed data: {normed_data.std(dim=dims).compute()}"
         )
-        all_var_stddev = normed_data.to_array().std(dim=["variable"] + dims)
-        logging.info(
-            f"Standard deviation computed over all variables: {all_var_stddev.values}"
-        )
+        try:
+            all_var_stddev = (
+                normed_data.to_array().std(dim=["variable"] + dims).compute()
+            )
+            logging.info(
+                f"Standard deviation computed over all variables: "
+                f"{all_var_stddev.values}"
+            )
+        except ValueError as e:
+            logging.info(
+                f"Skipping all-variable stddev check ({e}). "
+                f"Dataset has {len(normed_data.data_vars)} variables."
+            )
     else:
-        if is_local(out_dir):
-            makedirs(out_dir)
-            local_dir = out_dir
-            remote_dir: Optional[str] = None
-        else:
+        if out_dir.startswith("gs:"):
             temp_dir = tempfile.TemporaryDirectory()
             local_dir = temp_dir.name
-            remote_dir = out_dir
+            remote_dir: Optional[str] = out_dir
+        else:
+            if not os.path.isdir(out_dir):
+                os.makedirs(out_dir)
+            local_dir = out_dir
+            remote_dir = None
 
         centering.to_netcdf(os.path.join(local_dir, "centering.nc"))
         if remote_dir is not None:
@@ -264,36 +352,33 @@ def main(config_yaml: str, run: int, debug: bool):
     if run_name in config.stats.exclude_runs:
         logging.info(f"Skipping run {run_name}")
         return
-    if config.data_output_directory.endswith("/"):
-        config.data_output_directory = config.data_output_directory[:-1]
-    input_zarr = config.data_output_directory + "/" + run_name + ".zarr"
     out_dir = config.stats.output_directory + "/" + run_name
-    get_stats(
-        config=config.stats,
-        input_zarr=input_zarr,
-        out_dir=out_dir,
-        debug=debug,
-    )
-    if config.time_coarsen is not None:
-        unknown_keys = set(config.time_coarsen.output_names) - set(config.runs)
-        if unknown_keys:
+    if config.stats.data_path is not None:
+        get_stats(
+            config=config.stats,
+            out_dir=out_dir,
+            debug=debug,
+        )
+    else:
+        if config.data_output_directory is None:
             raise ValueError(
-                f"time_coarsen.output_names keys not found in runs: {unknown_keys}"
+                "data_output_directory is required when stats.data_path is not set."
             )
-        if config.time_coarsen.data_output_directory.endswith("/"):
-            config.time_coarsen.data_output_directory = (
-                config.time_coarsen.data_output_directory[:-1]
-            )
-        if config.time_coarsen.stats_output_directory.endswith("/"):
-            config.time_coarsen.stats_output_directory = (
-                config.time_coarsen.stats_output_directory[:-1]
-            )
-        output_name = config.time_coarsen.output_names.get(run_name, run_name)
+        if config.data_output_directory.endswith("/"):
+            config.data_output_directory = config.data_output_directory[:-1]
+        input_zarr = config.data_output_directory + "/" + run_name + ".zarr"
+        get_stats(
+            config=config.stats,
+            input_zarr=input_zarr,
+            out_dir=out_dir,
+            debug=debug,
+        )
+    if config.time_coarsen is not None:
         time_coarsened_zarr = (
-            config.time_coarsen.data_output_directory + "/" + output_name + ".zarr"
+            config.time_coarsen.data_output_directory + "/" + run_name + ".zarr"
         )
         time_coarsened_out_dir = (
-            config.time_coarsen.stats_output_directory + "/" + output_name
+            config.time_coarsen.stats_output_directory + "/" + run_name
         )
         get_stats(
             config=config.stats,
