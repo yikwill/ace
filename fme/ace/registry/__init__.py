@@ -6,6 +6,7 @@ from . import local_net as _localnet
 from . import m2lines as _m2lines
 from . import prebuilt as _prebuilt
 from . import sfno as _sfno
+from . import spherical_resnet as _spherical_resnet
 from . import spherical_unet as _spherical_unet
 from . import stochastic_sfno as _sfno_crps
 from . import swin_transformer as _swin
@@ -21,4 +22,5 @@ del (
     _mlp,
     _swin,
     _spherical_unet,
+    _spherical_resnet,
 )
