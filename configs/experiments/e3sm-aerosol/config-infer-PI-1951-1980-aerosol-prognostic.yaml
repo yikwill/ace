@@ -1,0 +1,55 @@
+experiment_dir: FME_OUTPUT_DIR
+n_forward_steps: 43799  # 1951-01-01 -> 1980-12-31 18:00 at 6-hourly (noleap)
+# Prognostic stepper holds 31 emis forcings; 240 OOMs on 40GB A100 (train inline uses 40).
+forward_steps_in_memory: 40
+checkpoint_path: FME_CHECKPOINT_PATH
+logging:
+  log_to_screen: true
+  log_to_wandb: true
+  log_to_file: true
+  project: ace-e3sm-aerosol
+  entity: yikwill-university-of-washington
+loader:
+  start_indices:
+    times:
+      - '1951-01-01T00:00:00'
+  dataset:
+    # Main zarr first for ak_*/bk_* vertical coords; emis zarr has none.
+    merge:
+      - data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets
+        file_pattern: e3sm-aerosol-PI-1945-1980.zarr
+        engine: zarr
+        overwrite:
+          multiply_scalar:
+            PRECT: 1000.0 # m/s to kg/m^2/s
+      - data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets
+        file_pattern: e3sm-aerosol-PI-emis-forcing-6hourly-1945-1980.zarr
+        engine: zarr
+  num_data_workers: 4
+aggregator:
+  log_histograms: false
+  log_zonal_mean_images: false
+  log_nino34_index: false
+  log_ipo_index: false
+  time_mean_reference_data: /global/cfs/projectdirs/e3sm/yikwill/datasets/e3sm-aerosol-stats-aerosol-prognostic/PI/time-mean.nc
+data_writer:
+  save_prediction_files: false
+  save_monthly_files: false
+  files:
+    - label: predictions
+      names:
+        - FLUS
+        - FLUT
+        - FLDS
+        - FSDS
+        - FSUS
+        - FSUTOA
+        - cdnc
+        - lcc
+        - lwp
+      save_reference: false
+      format:
+        name: zarr
+        chunks:
+          time: 1
+          sample: 1

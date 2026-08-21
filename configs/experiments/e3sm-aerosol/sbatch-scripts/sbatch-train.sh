@@ -1,18 +1,19 @@
 #!/bin/bash -l
 
-#SBATCH -A m1266_g
+#SBATCH -A e3sm
 #SBATCH -q regular
 #SBATCH -C gpu
-#SBATCH -J train-fme
+#SBATCH -J train-e3sm-aerosol
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=128
-#SBATCH -t 22:00:00
+#SBATCH -t 48:00:00
 #SBATCH --output=joblogs/%j.out
 #SBATCH --signal=USR1@60
 #SBATCH --requeue
 #SBATCH --open-mode=append
+#SBATCH --output=/global/homes/y/yikwill/llnl-research/slurm-out/slurm-%j.out
 #SBATCH --mail-user=yikwill@uw.edu
 #SBATCH --mail-type=ALL
 
@@ -42,9 +43,6 @@ TRAIN_CONFIG=${CONFIG_DIR}/train-config.yaml
 
 # replace placeholders in config with actual values
 sed -i "s|FME_OUTPUT_DIR|${FME_OUTPUT_DIR}|" ${TRAIN_CONFIG}
-sed -i "s|FME_TRAIN_DIR|${FME_TRAIN_DIR}|" ${TRAIN_CONFIG}
-sed -i "s|FME_VALID_DIR|${FME_VALID_DIR}|" ${TRAIN_CONFIG}
-sed -i "s|FME_STATS_DIR|${FME_STATS_DIR}|" ${TRAIN_CONFIG}
 
 cp -r $CONFIG_DIR $FME_OUTPUT_DIR/job_config
 

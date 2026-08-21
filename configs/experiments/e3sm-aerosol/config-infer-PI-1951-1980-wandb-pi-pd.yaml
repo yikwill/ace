@@ -1,0 +1,74 @@
+experiment_dir: FME_OUTPUT_DIR
+n_forward_steps: 43799  # 1951-01-01 -> 1980-12-31 18:00 at 6-hourly (noleap)
+forward_steps_in_memory: 240
+checkpoint_path: FME_CHECKPOINT_PATH
+logging:
+  log_to_screen: true
+  log_to_wandb: true
+  log_to_file: false
+  project: ace
+  entity: yikwill-university-of-washington
+loader:
+  start_indices:
+    times:
+      - '1951-01-01T00:00:00'
+  dataset:
+    merge:
+      - data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/e3sm-aerosol-PI-monthly-clim-6hourly-1945-1980
+        file_pattern: '*.nc'
+      - data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/e3sm-aerosol-PI-1945-1980
+        file_pattern: '*.nc'
+        overwrite:
+          multiply_scalar:
+            PRECT: 1000.0
+  num_data_workers: 4
+validation:
+  loader:
+    batch_size: 8
+    num_data_workers: 4
+    prefetch_factor: 2
+    dataset:
+      merge:
+        - data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/e3sm-aerosol-PI-monthly-clim-6hourly-1945-1980
+          file_pattern: '*.nc'
+          subset:
+            start_time: '1976-01-01'
+            stop_time: '1980-12-31'
+        - data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/e3sm-aerosol-PI-1945-1980
+          file_pattern: '*.nc'
+          overwrite:
+            multiply_scalar:
+              PRECT: 1000.0
+          subset:
+            start_time: '1976-01-01'
+            stop_time: '1980-12-31'
+  stepper_training:
+    n_forward_steps: 2
+    loss:
+      type: MSE
+      weights:
+        T_0: 0.5
+        T_1: 0.5
+        U_0: 0.5
+        V_0: 0.5
+        STW_0: 0.5
+        STW_1: 0.25
+        STW_2: 0.5
+        PRECT: 2
+        STWat2m: 0.5
+        FLDS: 2
+        FLUS: 5
+        FSUS: 2
+        FSDS: 2
+        FSUTOA: 2
+        DTENDTTW: 0.5
+aggregator:
+  histogram:
+    enabled: true
+  ipo_index:
+    enabled: false
+  time_mean_denorm:
+    reference_data: /global/cfs/projectdirs/e3sm/yikwill/datasets/e3sm-aerosol-stats-aerosol-clim-forcing/PI/time-mean.nc
+data_writer:
+  save_prediction_files: false
+  save_monthly_files: false

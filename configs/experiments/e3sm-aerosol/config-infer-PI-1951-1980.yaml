@@ -1,0 +1,55 @@
+experiment_dir: FME_OUTPUT_DIR
+n_forward_steps: 43799  # 1951-01-01 -> 1980-12-31 18:00 at 6-hourly (noleap)
+forward_steps_in_memory: 240
+checkpoint_path: FME_CHECKPOINT_PATH
+logging:
+  log_to_screen: true
+  log_to_wandb: true
+  log_to_file: true
+  project: ace-e3sm-aerosol
+  entity: yikwill-university-of-washington
+loader:
+  start_indices:
+    times:
+      - '1951-01-01T00:00:00'
+  dataset:
+    merge:
+      - data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets
+        file_pattern: e3sm-aerosol-PI-aerosol-clim-6hourly-1945-1980.zarr
+        engine: zarr
+      - data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets
+        file_pattern: e3sm-aerosol-PI-1945-1980.zarr
+        engine: zarr
+        overwrite:
+          multiply_scalar:
+            PRECT: 1000.0 # m/s to kg/m^2/s
+  num_data_workers: 4
+aggregator:
+  log_histograms: false
+  log_zonal_mean_images: false
+  log_nino34_index: false
+  log_ipo_index: false
+  time_mean_reference_data: /global/cfs/projectdirs/e3sm/yikwill/datasets/e3sm-aerosol-stats-aerosol-clim-forcing/PI/time-mean.nc
+data_writer:
+  save_prediction_files: false
+  save_monthly_files: false
+  files:
+    - label: predictions
+      names:
+        - FLUS
+        - FLUT
+        - FLDS
+        - FSDS
+        - FSUS
+        - FSUTOA
+        - cdnc
+        - lcc
+        - lwp
+      save_reference: false
+      format:
+        name: zarr
+        # ACE ZarrWriter requires time=1 and sample=1 (writes one step at a time).
+        # The ERFaer notebook rechunks time to ~1 year on read.
+        chunks:
+          time: 1
+          sample: 1

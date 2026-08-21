@@ -1,0 +1,5 @@
+runs:
+  v3.LR.F2010.PI.aigo: ""
+  v3.LR.F2010.aigo: ""
+stats:
+  output_directory: /global/cfs/cdirs/e3sm/yikwill/datasets/e3sm-aerosol-stats-PI-PD
