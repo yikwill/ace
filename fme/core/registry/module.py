@@ -63,6 +63,7 @@ CONDITIONAL_BUILDERS = [
     "LocalNet",
     "SwinTransformer",
     "NoiseConditionedSwinTransformer",
+    "NoiseConditionedSphericalUNet",
 ]
 
 
