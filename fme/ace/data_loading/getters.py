@@ -106,11 +106,14 @@ def get_gridded_data(
 
     sampler = _get_sampler(dataset, config.sample_with_replacement, train)
 
-    if _force_forkserver or (config.zarr_engine_used and config.num_data_workers > 0):
+    if config.num_data_workers > 0 and (_force_forkserver or config.zarr_engine_used):
         # GCSFS and S3FS are not fork-safe, so we need to use forkserver
-        # reading zarr with async from weka also requires forkserver
+        # reading zarr with async from weka also requires forkserver.
+        # Persist workers only for the train loader. Val runs once per epoch;
+        # persistent val workers then sit idle for the ~2h train stretch and
+        # their RSS stacks into the GPU-node cgroup (~224 GiB).
         mp_context = "forkserver"
-        persistent_workers = True
+        persistent_workers = train
         dataset.enable_shared_memory()
     else:
         mp_context = None
@@ -205,11 +208,13 @@ def get_inference_data(
     )
     properties = dataset.properties
 
-    if config.zarr_engine_used or _force_forkserver:
-        # GCSFS and S3FS are not fork-safe, so we need to use forkserver
-        # persist workers since startup is slow
+    if (config.zarr_engine_used or _force_forkserver) and config.num_data_workers > 0:
+        # GCSFS and S3FS are not fork-safe, so we need to use forkserver.
+        # Do not persist: inline inference runs once per epoch, then training
+        # runs for hours. Persistent workers would sit idle in host RSS.
+        # PyTorch also rejects persistent_workers when num_workers == 0.
         mp_context = "forkserver"
-        persistent_workers = True
+        persistent_workers = False
         worker_init_fn = _forkserver_worker_init_fn
     else:
         mp_context = None
