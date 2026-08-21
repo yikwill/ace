@@ -1,0 +1,229 @@
+import warnings
+
+import pytest
+import torch
+import torch.nn as nn
+from torch_harmonics import DiscreteContinuousConvS2
+
+import fme
+from fme.core.models.conditional_sfno.layers import MLP, ConditionalLayerNorm, Context
+from fme.core.models.spherical_unet import (
+    DiscoBasisSpec,
+    SphericalUNet,
+    SphericalUNetContextConfig,
+)
+from fme.core.models.spherical_unet.s2unet import (
+    _DiscoConvNeXtBlock,
+    _LayerScale,
+    _MultiBasisDiscreteContinuousConvS2,
+)
+
+SMALL_IMG = (32, 64)
+SMALL_EMBED = [8, 16, 32]
+ERA5_IMG = (180, 360)
+
+MULTI_FILTER_BASES = [
+    DiscoBasisSpec(basis_type="harmonic", kernel_shape=(3, 3)),
+    DiscoBasisSpec(basis_type="zernike", kernel_shape=(4,)),
+]
+
+
+def _small_unet(
+    *,
+    img_size: tuple[int, int] = SMALL_IMG,
+    in_chans: int = 5,
+    out_chans: int = 3,
+    embed_dims: list[int] | None = None,
+    depths: list[int] | None = None,
+    scale_factor: int = 2,
+    path_drop_rate: float = 0.0,
+    mlp_drop_rate: float = 0.0,
+    context_config: SphericalUNetContextConfig | None = None,
+    filter_bases: list[DiscoBasisSpec] | None = None,
+    downsampling_mode: str = "conv",
+    upsampling_mode: str = "bilinear",
+) -> SphericalUNet:
+    return SphericalUNet(
+        img_size=img_size,
+        in_chans=in_chans,
+        out_chans=out_chans,
+        embed_dims=embed_dims if embed_dims is not None else SMALL_EMBED,
+        depths=depths if depths is not None else [1, 1, 1],
+        scale_factor=scale_factor,
+        path_drop_rate=path_drop_rate,
+        mlp_drop_rate=mlp_drop_rate,
+        context_config=context_config,
+        filter_bases=filter_bases,
+        downsampling_mode=downsampling_mode,
+        upsampling_mode=upsampling_mode,
+    )
+
+
+def test_forward_shape_small():
+    model = _small_unet().to(fme.get_device())
+    x = torch.randn(2, 5, *SMALL_IMG, device=fme.get_device())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        out = model(x)
+    assert out.shape == (2, 3, *SMALL_IMG)
+
+
+@pytest.mark.gpu
+def test_forward_shape_era5():
+    model = SphericalUNet(
+        img_size=ERA5_IMG,
+        in_chans=4,
+        out_chans=2,
+        embed_dims=[16, 32, 64],
+        depths=[1, 1, 1],
+        path_drop_rate=0.0,
+        mlp_drop_rate=0.0,
+    ).to(fme.get_device())
+    x = torch.randn(1, 4, *ERA5_IMG, device=fme.get_device())
+    out = model(x)
+    assert out.shape == (1, 2, *ERA5_IMG)
+
+
+def test_uses_conditional_layer_norm_not_batch_norm():
+    model = _small_unet()
+    for module in model.modules():
+        assert not isinstance(module, nn.BatchNorm2d)
+    cln_count = sum(
+        1 for module in model.modules() if isinstance(module, ConditionalLayerNorm)
+    )
+    assert cln_count > 0
+
+
+def test_convnext_block_structure():
+    model = _small_unet()
+    blocks = [m for m in model.modules() if isinstance(m, _DiscoConvNeXtBlock)]
+    assert len(blocks) > 0
+    block = blocks[0]
+    assert isinstance(block.norm, ConditionalLayerNorm)
+    assert isinstance(block.mlp, MLP)
+    assert isinstance(block.layer_scale, _LayerScale)
+
+
+def test_context_config_has_no_positional_embedding():
+    config = SphericalUNetContextConfig(embed_dim_noise=8)
+    assert not hasattr(config, "embed_dim_pos")
+    assert config.to_context_config().embed_dim_pos == 0
+
+
+def test_forward_with_cln():
+    noise_dim = 8
+    context_config = SphericalUNetContextConfig(embed_dim_noise=noise_dim)
+    model = _small_unet(context_config=context_config).to(fme.get_device())
+    x = torch.randn(2, 5, *SMALL_IMG, device=fme.get_device())
+    noise = torch.randn(2, noise_dim, *SMALL_IMG, device=fme.get_device())
+    context = Context(
+        embedding_scalar=None,
+        embedding_pos=None,
+        labels=None,
+        noise=noise,
+    )
+    out = model(x, context)
+    assert out.shape == (2, 3, *SMALL_IMG)
+
+
+def test_forward_unconditional_ignores_context():
+    model = _small_unet().to(fme.get_device())
+    x = torch.randn(2, 5, *SMALL_IMG, device=fme.get_device())
+    noise = torch.randn(2, 8, *SMALL_IMG, device=fme.get_device())
+    context = Context(
+        embedding_scalar=None,
+        embedding_pos=None,
+        labels=None,
+        noise=noise,
+    )
+    out_with = model(x, context)
+    out_without = model(x)
+    assert out_with.shape == out_without.shape
+
+
+def test_single_basis_backward_compat():
+    model = _small_unet().to(fme.get_device())
+    blocks = [m for m in model.modules() if isinstance(m, _DiscoConvNeXtBlock)]
+    assert len(blocks) > 0
+    assert isinstance(blocks[0].conv, DiscreteContinuousConvS2)
+    assert not isinstance(blocks[0].conv, _MultiBasisDiscreteContinuousConvS2)
+
+
+def test_multi_basis_forward_shape():
+    model = _small_unet(filter_bases=MULTI_FILTER_BASES).to(fme.get_device())
+    x = torch.randn(2, 5, *SMALL_IMG, device=fme.get_device())
+    out = model(x)
+    assert out.shape == (2, 3, *SMALL_IMG)
+
+
+def test_multi_basis_uses_wrapper():
+    model = _small_unet(filter_bases=MULTI_FILTER_BASES)
+    blocks = [m for m in model.modules() if isinstance(m, _DiscoConvNeXtBlock)]
+    assert len(blocks) > 0
+    conv = blocks[0].conv
+    assert isinstance(conv, _MultiBasisDiscreteContinuousConvS2)
+    assert len(conv.branches) == 2
+    assert len(conv.branch_scales) == 2
+    assert all(isinstance(scale, _LayerScale) for scale in conv.branch_scales)
+
+
+def test_conv_upsample_multi_basis():
+    model = _small_unet(
+        filter_bases=MULTI_FILTER_BASES,
+        downsampling_mode="conv",
+        upsampling_mode="conv",
+    ).to(fme.get_device())
+    x = torch.randn(2, 5, *SMALL_IMG, device=fme.get_device())
+    out = model(x)
+    assert out.shape == (2, 3, *SMALL_IMG)
+
+
+ISO_MORLET_BASE = [
+    DiscoBasisSpec(basis_type="isotropic morlet", kernel_shape=(8,)),
+]
+
+
+def test_forward_isotropic_morlet():
+    model = _small_unet(filter_bases=ISO_MORLET_BASE).to(fme.get_device())
+    x = torch.randn(2, 5, *SMALL_IMG, device=fme.get_device())
+    out = model(x)
+    assert out.shape == (2, 3, *SMALL_IMG)
+
+
+def test_isotropic_morlet_conv_lat_flip_symmetry():
+    from fme.core.models.spherical_unet.s2unet import _compute_cutoff_radius
+
+    embed_dim = 4
+    img_shape = (16, 32)
+    lat_dim = 2
+    kernel_shape = (8,)
+
+    theta_cutoff = _compute_cutoff_radius(
+        nlat=img_shape[0],
+        kernel_shape=kernel_shape,
+        basis_type="isotropic morlet",
+    )
+    conv = DiscreteContinuousConvS2(
+        embed_dim,
+        embed_dim,
+        in_shape=img_shape,
+        out_shape=img_shape,
+        kernel_shape=kernel_shape,
+        basis_type="isotropic morlet",
+        basis_norm_mode="nodal",
+        groups=1,
+        grid_in="equiangular",
+        grid_out="equiangular",
+        bias=False,
+        theta_cutoff=theta_cutoff,
+    )
+
+    x = torch.randn(1, embed_dim, *img_shape)
+    x_flipped = torch.flip(x, dims=[lat_dim])
+    with torch.no_grad():
+        out = conv(x)
+        out_from_flipped = conv(x_flipped)
+    torch.testing.assert_close(
+        torch.flip(out, dims=[lat_dim]),
+        out_from_flipped,
+    )
