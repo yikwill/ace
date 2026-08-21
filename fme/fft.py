@@ -84,12 +84,16 @@ def irfft(x: torch.Tensor, n: Optional[int] = None, dim: int = -1, **kwargs) -> 
     if n is None:
         n = 2 * (x.size(dim) - 1)
 
-    # ensure that imaginary part of 0 and nyquist components are zero
-    # this is important because not all backend algorithms provided through the
-    # irfft interface ensure that
-    x[..., 0].imag = 0.0
+    # Zero imaginary part of DC (and Nyquist if present) functionally — in-place
+    # writes on complex views break autograd under multi-step unroll.
+    imag_scale = torch.ones(x.size(dim), dtype=x.real.dtype, device=x.device)
+    imag_scale[0] = 0.0
     if (n % 2 == 0) and (n // 2 < x.size(dim)):
-        x[..., n // 2].imag = 0.0
+        imag_scale[n // 2] = 0.0
+    shape = [1] * x.ndim
+    shape[dim] = -1
+    imag_scale = imag_scale.reshape(*shape)
+    x = torch.complex(x.real, x.imag * imag_scale)
 
     x = fft.irfft(x, n=n, dim=dim, **kwargs)
 
