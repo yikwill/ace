@@ -64,6 +64,7 @@ CONDITIONAL_BUILDERS = [
     "SwinTransformer",
     "NoiseConditionedSwinTransformer",
     "NoiseConditionedSphericalUNet",
+    "NoiseConditionedSphericalResNet",
 ]
 
 
