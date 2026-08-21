@@ -97,11 +97,16 @@ def get_job_id() -> str | None:
 def git_revision_short_hash() -> str | None:
     try:
         return (
-            subprocess.check_output(["git", "rev-parse", "--short", "HEAD"])
+            subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                # Broken worktree metadata otherwise floods logs with
+                # "fatal: not a git repository" on every rank.
+                stderr=subprocess.DEVNULL,
+            )
             .decode("ascii")
             .strip()
         )
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, FileNotFoundError):
         return None
 
 
