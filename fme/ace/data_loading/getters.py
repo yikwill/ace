@@ -209,7 +209,7 @@ def get_inference_data(
         # GCSFS and S3FS are not fork-safe, so we need to use forkserver
         # persist workers since startup is slow
         mp_context = "forkserver"
-        persistent_workers = True
+        persistent_workers = config.num_data_workers > 0
         worker_init_fn = _forkserver_worker_init_fn
     else:
         mp_context = None
