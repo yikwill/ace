@@ -12,10 +12,13 @@ from fme.core.dicts import to_flat_dict
 from fme.core.distributed import Distributed
 from fme.core.wandb import WandB
 
+# Optional cluster/runtime hints. Missing values are omitted from WandB config
+# without warnings — Beaker/SLURM are not used on all platforms (e.g. Polaris PBS).
 ENV_VAR_NAMES = (
     "BEAKER_EXPERIMENT_ID",
     "SLURM_JOB_ID",
     "SLURM_JOB_USER",
+    "PBS_JOBID",
     "FME_TRAIN_DIR",
     "FME_VALID_DIR",
     "FME_STATS_DIR",
@@ -166,11 +169,7 @@ class LoggingConfig:
 
 
 def _get_beaker_id() -> str | None:
-    try:
-        return os.environ["BEAKER_EXPERIMENT_ID"]
-    except KeyError:
-        logging.warning("Beaker Experiment ID not found.")
-        return None
+    return os.environ.get("BEAKER_EXPERIMENT_ID") or None
 
 
 def _get_wandb_notes(beaker_id: str | None) -> str | None:
@@ -182,9 +181,9 @@ def _get_wandb_notes(beaker_id: str | None) -> str | None:
     return None
 
 
-def _get_beaker_url(beaker_id: str | None) -> str:
+def _get_beaker_url(beaker_id: str | None) -> str | None:
     if beaker_id is None:
-        return "No beaker URL."
+        return None
     return f"https://beaker.org/ex/{beaker_id}"
 
 
@@ -197,31 +196,35 @@ def log_versions():
 
 
 def retrieve_env_vars(names=ENV_VAR_NAMES) -> dict[str, str]:
-    """Return a dictionary of specific environmental variables."""
+    """Return a dictionary of specific environmental variables.
+
+    Only includes variables that are set. Missing optional cluster vars
+    (Beaker/SLURM/PBS/FME_*) are skipped without warnings.
+    """
     output = {}
     for name in names:
-        try:
-            value = os.environ[name]
-        except KeyError:
-            logging.warning(f"Environmental variable {name} not found.")
-        else:
-            output[name] = value
-            logging.info(f"Environmental variable {name}={value}.")
+        value = os.environ.get(name)
+        if value is None:
+            continue
+        output[name] = value
+        logging.info(f"Environmental variable {name}={value}.")
     return output
 
 
 def log_beaker_url(beaker_id=None):
-    """Log the Beaker ID and URL for the current experiment.
+    """Log the Beaker ID and URL when running under Beaker.
 
     beaker_id: The Beaker ID of the experiment. If None, uses the env variable
-    `BEAKER_EXPERIMENT_ID`.
+    `BEAKER_EXPERIMENT_ID`. No-ops (returns None) when not on Beaker.
 
-    Returns the Beaker URL.
+    Returns the Beaker URL, or None if not on Beaker.
     """
     if beaker_id is None:
         beaker_id = _get_beaker_id()
 
     beaker_url = _get_beaker_url(beaker_id)
+    if beaker_id is None:
+        return None
     logging.info(f"Beaker ID: {beaker_id}")
     logging.info(f"Beaker URL: {beaker_url}")
     return beaker_url
