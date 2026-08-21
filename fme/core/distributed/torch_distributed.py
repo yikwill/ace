@@ -205,10 +205,13 @@ class TorchDistributed(DistributedBackend):
                 output_device = [self._device_id]
             else:
                 output_device = None
+            # DISCO/SHT modules register precomputed buffers; DDP buffer
+            # broadcast mutates them in-place and breaks autograd under unroll.
             return DistributedDataParallel(
                 SyncBatchNorm.convert_sync_batchnorm(module),
                 device_ids=self._device_ids,
                 output_device=output_device,
+                broadcast_buffers=False,
             )
         return DummyWrapper(module)
 
