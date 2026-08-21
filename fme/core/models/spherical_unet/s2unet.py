@@ -110,6 +110,18 @@ def _compute_cutoff_radius(
     )
 
 
+def _resolve_theta_cutoff(
+    nlat: int,
+    kernel_shape: tuple[int, ...],
+    basis_type: str,
+    theta_cutoff: float | None,
+) -> float:
+    """Use an explicit cutoff when set; otherwise the kernel_shape/nlat heuristic."""
+    if theta_cutoff is not None:
+        return theta_cutoff
+    return _compute_cutoff_radius(nlat, kernel_shape, basis_type)
+
+
 def _default_context_config() -> SphericalUNetContextConfig:
     return SphericalUNetContextConfig()
 
@@ -162,6 +174,7 @@ class _MultiBasisDiscreteContinuousConvS2(nn.Module):
         nlat_for_cutoff: int,
         layer_scale_init: float = 0.1,
         bias: bool = False,
+        theta_cutoff: float | None = None,
     ):
         super().__init__()
         if len(filter_bases) < 2:
@@ -169,8 +182,8 @@ class _MultiBasisDiscreteContinuousConvS2(nn.Module):
         self.branches = nn.ModuleList()
         self.branch_scales = nn.ModuleList()
         for spec in filter_bases:
-            theta_cutoff = _compute_cutoff_radius(
-                nlat_for_cutoff, spec.kernel_shape, spec.basis_type
+            branch_cutoff = _resolve_theta_cutoff(
+                nlat_for_cutoff, spec.kernel_shape, spec.basis_type, theta_cutoff
             )
             self.branches.append(
                 DiscreteContinuousConvS2(
@@ -184,7 +197,7 @@ class _MultiBasisDiscreteContinuousConvS2(nn.Module):
                     grid_in=grid_in,
                     grid_out=grid_out,
                     bias=bias,
-                    theta_cutoff=theta_cutoff,
+                    theta_cutoff=branch_cutoff,
                 )
             )
             self.branch_scales.append(
@@ -214,6 +227,7 @@ class _MultiBasisDiscreteContinuousConvTransposeS2(nn.Module):
         nlat_for_cutoff: int,
         layer_scale_init: float = 0.1,
         bias: bool = False,
+        theta_cutoff: float | None = None,
     ):
         super().__init__()
         if len(filter_bases) < 2:
@@ -221,8 +235,8 @@ class _MultiBasisDiscreteContinuousConvTransposeS2(nn.Module):
         self.branches = nn.ModuleList()
         self.branch_scales = nn.ModuleList()
         for spec in filter_bases:
-            theta_cutoff = _compute_cutoff_radius(
-                nlat_for_cutoff, spec.kernel_shape, spec.basis_type
+            branch_cutoff = _resolve_theta_cutoff(
+                nlat_for_cutoff, spec.kernel_shape, spec.basis_type, theta_cutoff
             )
             self.branches.append(
                 DiscreteContinuousConvTransposeS2(
@@ -236,7 +250,7 @@ class _MultiBasisDiscreteContinuousConvTransposeS2(nn.Module):
                     grid_in=grid_in,
                     grid_out=grid_out,
                     bias=bias,
-                    theta_cutoff=theta_cutoff,
+                    theta_cutoff=branch_cutoff,
                 )
             )
             self.branch_scales.append(
@@ -262,11 +276,12 @@ def _make_disco_conv(
     nlat_for_cutoff: int,
     layer_scale_init: float = 0.1,
     bias: bool = False,
+    theta_cutoff: float | None = None,
 ) -> nn.Module:
     if len(filter_bases) == 1:
         spec = filter_bases[0]
-        theta_cutoff = _compute_cutoff_radius(
-            nlat_for_cutoff, spec.kernel_shape, spec.basis_type
+        resolved_cutoff = _resolve_theta_cutoff(
+            nlat_for_cutoff, spec.kernel_shape, spec.basis_type, theta_cutoff
         )
         return DiscreteContinuousConvS2(
             in_channels,
@@ -279,7 +294,7 @@ def _make_disco_conv(
             grid_in=grid_in,
             grid_out=grid_out,
             bias=bias,
-            theta_cutoff=theta_cutoff,
+            theta_cutoff=resolved_cutoff,
         )
     return _MultiBasisDiscreteContinuousConvS2(
         in_channels,
@@ -293,6 +308,7 @@ def _make_disco_conv(
         nlat_for_cutoff=nlat_for_cutoff,
         layer_scale_init=layer_scale_init,
         bias=bias,
+        theta_cutoff=theta_cutoff,
     )
 
 
@@ -308,11 +324,12 @@ def _make_disco_transpose_conv(
     nlat_for_cutoff: int,
     layer_scale_init: float = 0.1,
     bias: bool = False,
+    theta_cutoff: float | None = None,
 ) -> nn.Module:
     if len(filter_bases) == 1:
         spec = filter_bases[0]
-        theta_cutoff = _compute_cutoff_radius(
-            nlat_for_cutoff, spec.kernel_shape, spec.basis_type
+        resolved_cutoff = _resolve_theta_cutoff(
+            nlat_for_cutoff, spec.kernel_shape, spec.basis_type, theta_cutoff
         )
         return DiscreteContinuousConvTransposeS2(
             in_channels,
@@ -325,7 +342,7 @@ def _make_disco_transpose_conv(
             grid_in=grid_in,
             grid_out=grid_out,
             bias=bias,
-            theta_cutoff=theta_cutoff,
+            theta_cutoff=resolved_cutoff,
         )
     return _MultiBasisDiscreteContinuousConvTransposeS2(
         in_channels,
@@ -339,6 +356,7 @@ def _make_disco_transpose_conv(
         nlat_for_cutoff=nlat_for_cutoff,
         layer_scale_init=layer_scale_init,
         bias=bias,
+        theta_cutoff=theta_cutoff,
     )
 
 
@@ -360,6 +378,7 @@ class _DiscoConvNeXtBlock(nn.Module):
         path_drop_rate: float = 0.0,
         layer_scale: bool = True,
         layer_scale_init: float = 0.1,
+        theta_cutoff: float | None = None,
     ):
         super().__init__()
         self.conv = _make_disco_conv(
@@ -374,6 +393,7 @@ class _DiscoConvNeXtBlock(nn.Module):
             nlat_for_cutoff=in_shape[0],
             layer_scale_init=layer_scale_init,
             bias=False,
+            theta_cutoff=theta_cutoff,
         )
         self.norm = ConditionalLayerNorm(
             in_channels, in_shape, context_config.to_context_config()
