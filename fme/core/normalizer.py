@@ -26,6 +26,12 @@ class NormalizationConfig:
         global_stds_path: Path to a netCDF file containing global stds.
         means: Mapping from variable names to means.
         stds: Mapping from variable names to stds.
+        scalar_means_path: Optional netCDF of scalar means. When set with
+            ``scalar_means_names``, those variables use scalar means from this
+            file instead of ``global_means_path`` (e.g. keep orography / land
+            masks absolute while using a spatial time-mean for other fields).
+        scalar_means_names: Variable names that take means from
+            ``scalar_means_path``.
         fill_nans_on_normalize: Whether to fill NaNs during normalization. If
             true, on normalization NaNs in the denormalized input become zeros in
             the normalized output.
@@ -36,8 +42,14 @@ class NormalizationConfig:
 
     global_means_path: str | pathlib.Path | None = None
     global_stds_path: str | pathlib.Path | None = None
-    means: Mapping[str, float] = dataclasses.field(default_factory=dict)
-    stds: Mapping[str, float] = dataclasses.field(default_factory=dict)
+    means: Mapping[str, float | list | np.ndarray] = dataclasses.field(
+        default_factory=dict
+    )
+    stds: Mapping[str, float | list | np.ndarray] = dataclasses.field(
+        default_factory=dict
+    )
+    scalar_means_path: str | pathlib.Path | None = None
+    scalar_means_names: list[str] = dataclasses.field(default_factory=list)
     fill_nans_on_normalize: bool = False
     fill_nans_on_denormalize: bool = False
 
@@ -56,6 +68,17 @@ class NormalizationConfig:
                 "Must use either global_means_path and global_stds_path "
                 "or explicit means and stds."
             )
+        if self.scalar_means_names and self.scalar_means_path is None:
+            raise ValueError("scalar_means_names requires scalar_means_path")
+        if self.scalar_means_path is not None and not self.scalar_means_names:
+            raise ValueError(
+                "scalar_means_path requires a non-empty scalar_means_names"
+            )
+        if self.scalar_means_path is not None and not using_path:
+            raise ValueError(
+                "scalar_means_path requires global_means_path and global_stds_path "
+                "(cannot combine with explicit means/stds)"
+            )
 
     def load(self):
         """
@@ -71,6 +94,14 @@ class NormalizationConfig:
                 names=None,
                 defaults={"x": 0.0, "y": 0.0, "z": 0.0},
             )
+            if self.scalar_means_path is not None:
+                means.update(
+                    load_dict_from_netcdf(
+                        self.scalar_means_path,
+                        names=self.scalar_means_names,
+                        defaults={},
+                    )
+                )
             stds = load_dict_from_netcdf(
                 self.global_stds_path,
                 names=None,
@@ -80,6 +111,8 @@ class NormalizationConfig:
             self.stds = stds
             self.global_means_path = None
             self.global_stds_path = None
+            self.scalar_means_path = None
+            self.scalar_means_names = []
 
     def build(self, names: list[str]):
         using_path = (
@@ -90,6 +123,8 @@ class NormalizationConfig:
                 global_means_path=self.global_means_path,
                 global_stds_path=self.global_stds_path,
                 names=names,
+                scalar_means_path=self.scalar_means_path,
+                scalar_means_names=self.scalar_means_names,
                 fill_nans_on_normalize=self.fill_nans_on_normalize,
                 fill_nans_on_denormalize=self.fill_nans_on_denormalize,
             )
@@ -179,8 +214,8 @@ class StandardNormalizer:
         Returns state as a serializable data structure.
         """
         return {
-            "means": {k: float(v.cpu().numpy().item()) for k, v in self.means.items()},
-            "stds": {k: float(v.cpu().numpy().item()) for k, v in self.stds.items()},
+            "means": {k: _stat_to_serializable(v) for k, v in self.means.items()},
+            "stds": {k: _stat_to_serializable(v) for k, v in self.stds.items()},
             "fill_nans_on_normalize": self._fill_nans_on_normalize,
             "fill_nans_on_denormalize": self._fill_nans_on_denormalize,
         }
@@ -203,8 +238,8 @@ class StandardNormalizer:
 
     def get_normalization_config(self) -> NormalizationConfig:
         return NormalizationConfig(
-            means={k: float(v.cpu().numpy().item()) for k, v in self.means.items()},
-            stds={k: float(v.cpu().numpy().item()) for k, v in self.stds.items()},
+            means={k: _stat_to_serializable(v) for k, v in self.means.items()},
+            stds={k: _stat_to_serializable(v) for k, v in self.stds.items()},
             fill_nans_on_normalize=self.fill_nans_on_normalize,
             fill_nans_on_denormalize=self.fill_nans_on_denormalize,
         )
@@ -236,18 +271,32 @@ def _denormalize(
     denormalized = {k: t * stds[k] + means[k] for k, t in tensors.items()}
     if fill_nans:
         for k, v in denormalized.items():
+            # means[k] may be spatial; zeros_like broadcasts the fill to v's shape
             denormalized[k] = torch.where(
-                torch.isnan(v), torch.full_like(v, fill_value=means[k]), v
+                torch.isnan(v), means[k] + torch.zeros_like(v), v
             )
     return denormalized
 
 
 def get_normalizer(
-    global_means_path, global_stds_path, names: list[str], **normalizer_kwargs
+    global_means_path,
+    global_stds_path,
+    names: list[str],
+    scalar_means_path: str | pathlib.Path | None = None,
+    scalar_means_names: list[str] | None = None,
+    **normalizer_kwargs,
 ) -> StandardNormalizer:
     means = load_dict_from_netcdf(
         global_means_path, names, defaults={"x": 0.0, "y": 0.0, "z": 0.0}
     )
+    if scalar_means_path is not None:
+        if not scalar_means_names:
+            raise ValueError("scalar_means_path requires scalar_means_names")
+        override_names = [n for n in scalar_means_names if n in names]
+        if override_names:
+            means.update(
+                load_dict_from_netcdf(scalar_means_path, override_names, defaults={})
+            )
     means = {k: torch.as_tensor(v, dtype=torch.float) for k, v in means.items()}
     stds = load_dict_from_netcdf(
         global_stds_path, names, defaults={"x": 1.0, "y": 1.0, "z": 1.0}
@@ -256,37 +305,50 @@ def get_normalizer(
     return StandardNormalizer(means=means, stds=stds, **normalizer_kwargs)
 
 
+def _stat_to_serializable(tensor: torch.Tensor) -> float | list:
+    """Convert a mean/std tensor to a JSON/torch-save friendly Python value."""
+    array = tensor.detach().cpu().numpy()
+    if array.ndim == 0:
+        return float(array.item())
+    return array.tolist()
+
+
 def load_dict_from_netcdf(
     path: str | pathlib.Path,
     names: Iterable[str] | None,
     defaults: Mapping[str, float | np.ndarray],
-) -> dict[str, float]:
+) -> dict[str, float | np.ndarray]:
     """
-    Load a dictionary of scalar variables from a netCDF file.
+    Load a dictionary of normalization statistics from a netCDF file.
+
+    Values may be scalars or arrays. Spatially varying means (e.g. a time-mean
+    map) are returned as float32 numpy arrays and broadcast against data tensors
+    during normalize/denormalize.
 
     Args:
         path: Path to the netCDF file.
-        names: List of variable names to load. If None, all variables in the netCDF
-            file are loaded.
+        names: List of variable names to load. If None, all data variables in the
+            netCDF file are loaded (coordinates are excluded).
         defaults: Dictionary of default values for each variable, if not found
             in the netCDF file.
     """
     with fsspec.open(path, "rb") as f:
         ds = xr.load_dataset(f, mask_and_scale=False)
 
-    result = {}
+    result: dict[str, float | np.ndarray] = {}
     if names is None:
-        names = set(ds.variables.keys()).union(defaults.keys())
-        skip_non_scalar = True
-    else:
-        skip_non_scalar = False
+        # data_vars omits lat/lon coordinates; keep spatial data vars (time means)
+        names = set(ds.data_vars).union(defaults.keys())
     for c in names:
         if c in ds.variables:
-            if skip_non_scalar and ds.variables[c].ndim > 0:
-                continue
-            result[c] = float(ds.variables[c].values.item())
+            values = np.asarray(ds.variables[c].values)
+            if values.ndim == 0:
+                result[c] = float(values.item())
+            else:
+                result[c] = values.astype(np.float32, copy=False)
         elif c in defaults:
-            result[c] = float(defaults[c])
+            default = defaults[c]
+            result[c] = float(default) if np.ndim(default) == 0 else np.asarray(default)
         else:
             raise ValueError(f"Variable {c} not found in {path}")
     ds.close()
