@@ -18,7 +18,11 @@ from fme.core.corrector.atmosphere import AtmosphereCorrectorConfig, EnergyBudge
 from fme.core.distributed.distributed import Distributed
 from fme.core.distributed.non_distributed import DummyWrapper
 from fme.core.labels import BatchLabels
-from fme.core.normalizer import NetworkAndLossNormalizationConfig, NormalizationConfig
+from fme.core.normalizer import (
+    NetworkAndLossNormalizationConfig,
+    NormalizationConfig,
+    StandardNormalizer,
+)
 from fme.core.ocean import OceanConfig
 from fme.core.registry import ModuleSelector
 from fme.core.step.args import StepArgs
@@ -36,6 +40,8 @@ from fme.core.step.single_module import (
     SingleModuleStepConfig,
     _apply_input_mask,
     _build_channel_mask_dict,
+    _residual_add_scales,
+    step_with_adjustments,
 )
 from fme.core.step.step import StepABC, StepSelector
 from fme.core.testing import get_dataset_info, trivial_network_and_loss_normalization
@@ -2254,3 +2260,109 @@ def test_multi_call_step_forwards_train_eval():
     wrapped_step.train.reset_mock()
     step.train()
     wrapped_step.train.assert_called_once_with(True)
+
+
+def _dummy_single_module_config(**kwargs) -> SingleModuleStepConfig:
+    names = kwargs.get("in_names", ["a", "b"])
+    defaults: dict = {
+        "builder": ModuleSelector(type="MLP", config={}),
+        "in_names": names,
+        "out_names": kwargs.get("out_names", names),
+        "normalization": trivial_network_and_loss_normalization(
+            set(names) | set(kwargs.get("out_names", names))
+        ),
+    }
+    defaults.update(kwargs)
+    return SingleModuleStepConfig(**defaults)
+
+
+def test_scale_residual_by_residual_std_requires_residual_prediction():
+    with pytest.raises(ValueError, match="residual_prediction=True"):
+        _dummy_single_module_config(scale_residual_by_residual_std=True)
+
+
+def test_scale_residual_by_residual_std_requires_residual_normalization():
+    with pytest.raises(ValueError, match="normalization.residual"):
+        _dummy_single_module_config(
+            residual_prediction=True,
+            scale_residual_by_residual_std=True,
+        )
+
+
+def test_residual_add_scales_ratio_and_zero_std_raises():
+    names = ["a"]
+    config = _dummy_single_module_config(
+        in_names=names,
+        out_names=names,
+        residual_prediction=True,
+        scale_residual_by_residual_std=True,
+        normalization=NetworkAndLossNormalizationConfig(
+            network=NormalizationConfig(means={"a": 0.0}, stds={"a": 2.0}),
+            residual=NormalizationConfig(means={"a": 0.0}, stds={"a": 0.5}),
+        ),
+    )
+    network_normalizer = config.normalization.get_network_normalizer(names)
+    scales = _residual_add_scales(config, network_normalizer)
+    assert scales is not None
+    expected = torch.tensor(0.25, device=scales["a"].device)
+    torch.testing.assert_close(scales["a"], expected)
+
+    zero_config = _dummy_single_module_config(
+        in_names=names,
+        out_names=names,
+        residual_prediction=True,
+        scale_residual_by_residual_std=True,
+        normalization=NetworkAndLossNormalizationConfig(
+            network=NormalizationConfig(means={"a": 0.0}, stds={"a": 0.0}),
+            residual=NormalizationConfig(means={"a": 0.0}, stds={"a": 0.5}),
+        ),
+    )
+    zero_normalizer = zero_config.normalization.get_network_normalizer(names)
+    with pytest.raises(ValueError, match="network std for 'a' is 0"):
+        _residual_add_scales(zero_config, zero_normalizer)
+
+
+def test_step_with_adjustments_scales_prognostic_residual_not_diagnostic():
+    """r_net=1, σ_full=2, σ_res=0.5 → prognostic add is 0.5; diagnostic unscaled."""
+    device = fme.get_device()
+    sigma_full = 2.0
+    sigma_res = 0.5
+    x = torch.ones(2, 4, 4, device=device)
+    normalizer = StandardNormalizer(
+        means={"a": torch.tensor(0.0), "c": torch.tensor(0.0)},
+        stds={"a": torch.tensor(sigma_full), "c": torch.tensor(sigma_full)},
+    )
+    scale = torch.tensor(sigma_res / sigma_full, device=device)
+
+    def network_calls(input_norm: TensorDict) -> TensorDict:
+        ones = torch.ones_like(input_norm["a"])
+        return {"a": ones, "c": ones}
+
+    scaled = step_with_adjustments(
+        input={"a": x.clone()},
+        next_step_input_data={},
+        network_calls=network_calls,
+        normalizer=normalizer,
+        corrector=None,
+        ocean=None,
+        residual_prediction=True,
+        prognostic_names=["a"],
+        residual_add_scales={"a": scale},
+    ).output
+    unscaled = step_with_adjustments(
+        input={"a": x.clone()},
+        next_step_input_data={},
+        network_calls=network_calls,
+        normalizer=normalizer,
+        corrector=None,
+        ocean=None,
+        residual_prediction=True,
+        prognostic_names=["a"],
+    ).output
+
+    # x_next = x + r_net * σ_res = 1 + 0.5
+    torch.testing.assert_close(scaled["a"], torch.full_like(x, 1.5))
+    # diagnostic: denorm(r_net) = 1 * σ_full, not added to input
+    torch.testing.assert_close(scaled["c"], torch.full_like(x, sigma_full))
+    # default residual add: x + r_net * σ_full = 1 + 2
+    torch.testing.assert_close(unscaled["a"], torch.full_like(x, 3.0))

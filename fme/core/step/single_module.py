@@ -65,6 +65,11 @@ class SingleModuleStepConfig(StepConfigABC):
         prescribed_prognostic_names: Prognostic variable names to overwrite from
             forcing data at each step (e.g. for inference with observed values).
         residual_prediction: Whether to use residual prediction.
+        scale_residual_by_residual_std: If True, multiply prognostic network
+            outputs by σ_res/σ_full before the residual add so the network
+            predicts in residual units (x_next = x + r_net * σ_res). Requires
+            residual_prediction and normalization.residual. Default False
+            keeps x_next = x + r_net * σ_full.
         include_channel_mask_inputs: Whether to append per-variable mask indicator
             channels to the network input. When True, the network receives
             ``len(in_names)`` additional float channels (1.0 = present, 0.0 =
@@ -92,12 +97,22 @@ class SingleModuleStepConfig(StepConfigABC):
     next_step_forcing_names: list[str] = dataclasses.field(default_factory=list)
     prescribed_prognostic_names: list[str] = dataclasses.field(default_factory=list)
     residual_prediction: bool = False
+    scale_residual_by_residual_std: bool = False
     include_channel_mask_inputs: bool = False
     global_mean_removal: GlobalMeanRemovalConfigUnion | None = None
     input_dropout: VariableMaskingConfig | None = None
 
     def __post_init__(self):
         self.crps_training = None  # unused, kept for backwards compatibility
+        if self.scale_residual_by_residual_std:
+            if not self.residual_prediction:
+                raise ValueError(
+                    "scale_residual_by_residual_std requires residual_prediction=True"
+                )
+            if self.normalization.residual is None:
+                raise ValueError(
+                    "scale_residual_by_residual_std requires normalization.residual"
+                )
         if self.global_mean_removal is not None:
             self.global_mean_removal.validate_names(self.in_names, self.out_names)
         for name in self.prescribed_prognostic_names:
@@ -352,6 +367,7 @@ class SingleModuleStep(StepABC):
         self._corrector = corrector
         self.in_names = config.in_names
         self.out_names = config.out_names
+        self._residual_add_scales = _residual_add_scales(config, normalizer)
 
     @property
     def config(self) -> SingleModuleStepConfig:
@@ -454,6 +470,7 @@ class SingleModuleStep(StepABC):
             residual_prediction=self._config.residual_prediction,
             prognostic_names=self.prognostic_names,
             prescribed_prognostic_names=self._config.prescribed_prognostic_names,
+            residual_add_scales=self._residual_add_scales,
             global_mean_removal=self._global_mean_removal,
             data_mask=args.data_mask,
             stepper_state=args.stepper_state,
@@ -603,6 +620,35 @@ def _build_channel_mask_dict(
     return result
 
 
+def _residual_add_scales(
+    config: SingleModuleStepConfig,
+    network_normalizer: StandardNormalizer,
+) -> TensorDict | None:
+    """Per-prognostic σ_res/σ_full for residual-unit prediction, or None."""
+    if not config.scale_residual_by_residual_std:
+        return None
+    loss_normalizer = config.get_loss_normalizer()
+    scales: TensorDict = {}
+    for name in config.prognostic_names:
+        if name not in network_normalizer.stds:
+            raise ValueError(
+                "scale_residual_by_residual_std: prognostic "
+                f"'{name}' missing from network normalizer stds"
+            )
+        if name not in loss_normalizer.stds:
+            raise ValueError(
+                "scale_residual_by_residual_std: prognostic "
+                f"'{name}' missing from residual/loss normalizer stds"
+            )
+        sigma_full = network_normalizer.stds[name]
+        if float(sigma_full) == 0.0:
+            raise ValueError(
+                f"scale_residual_by_residual_std: network std for '{name}' is 0"
+            )
+        scales[name] = loss_normalizer.stds[name] / sigma_full
+    return scales
+
+
 def step_with_adjustments(
     input: TensorMapping,
     next_step_input_data: TensorMapping,
@@ -613,6 +659,7 @@ def step_with_adjustments(
     residual_prediction: bool,
     prognostic_names: list[str],
     prescribed_prognostic_names: list[str] | None = None,
+    residual_add_scales: TensorMapping | None = None,
     global_mean_removal: GlobalMeanRemoval | None = None,
     data_mask: TensorMapping | None = None,
     stepper_state: StepperState | None = None,
@@ -637,6 +684,9 @@ def step_with_adjustments(
         prognostic_names: Names of prognostic variables.
         prescribed_prognostic_names: Prognostic names to overwrite from
             next_step_input_data after the ocean step (e.g. for inference).
+        residual_add_scales: Optional per-prognostic σ_res/σ_full multipliers
+            applied to network outputs before the residual add. None keeps
+            the unscaled add (x_next = x + r_net * σ_full).
         global_mean_removal: Optional transform that removes per-sample
             global means before normalization and restores them after
             denormalization. When provided, ``forward_transform`` is called
@@ -672,6 +722,15 @@ def step_with_adjustments(
         input_norm = normalizer.normalize(input)
     output_norm = network_calls(input_norm)
     if residual_prediction:
+        if residual_add_scales:
+            output_norm = {
+                name: (
+                    value * residual_add_scales[name]
+                    if name in residual_add_scales
+                    else value
+                )
+                for name, value in output_norm.items()
+            }
         output_norm = add_names(input_norm, output_norm, prognostic_names)
     output = normalizer.denormalize(output_norm)
     if global_mean_removal is not None:
