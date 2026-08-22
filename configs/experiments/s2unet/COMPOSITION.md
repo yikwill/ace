@@ -15,7 +15,7 @@ No inter-branch dependencies. Merge into `main` in any order.
 |--------|------|
 | `fix/inference-persistent-workers` | Inference DataLoader: `persistent_workers` only when `num_data_workers > 0` |
 | `fix/irfft-autograd` | Functional DC/Nyquist imag clearing in `fme/fft.py` (multi-step autograd) |
-| `feature/spherical-unet` | `SphericalUNet` / `NoiseConditionedSphericalUNet` model + ACE registry + tests (includes optional DISCO `theta_cutoff`) |
+| `feature/spherical-unet` | `SphericalUNet` / `NoiseConditionedSphericalUNet` model + ACE registry + tests (optional DISCO `theta_cutoff`; opt-in `unet_layout: classic`) |
 | `feature/ar-input-noise` | Training-time AR input noise: `TrainStepperConfig.ar_input_noise_sigma` scales prognostic state noise by `|true Δ|` after each train step |
 | `feature/residual-std-scale` | Opt-in `scale_residual_by_residual_std`: prognostic residual add uses `σ_res/σ_full` so the network predicts in residual units |
 
@@ -25,6 +25,7 @@ No inter-branch dependencies. Merge into `main` in any order.
 - `configs/experiments/s2unet/config-train-era5-residual-prediction.yaml`
 - `configs/experiments/s2unet/config-train-era5-residual-prediction-ar-noise.yaml`
 - `configs/experiments/s2unet/config-train-era5-residual-prediction-res-scaled.yaml`
+- `configs/experiments/s2unet/config-train-era5-residual-prediction-res-scaled-classic.yaml`
 - `configs/experiments/s2unet/config-train-era5-sfno-baseline.yaml`
 - `fme/core/distributed/torch_distributed.py`: global `broadcast_buffers=False` for DDP (DISCO/SHT buffer workaround). Needs a narrower design before any `fix/` PR.
 - This file (`COMPOSITION.md`)
