@@ -43,6 +43,7 @@ def _small_unet(
     downsampling_mode: str = "conv",
     upsampling_mode: str = "bilinear",
     theta_cutoff: list[float | None] | None = None,
+    unet_layout: str = "downsample_first",
 ) -> SphericalUNet:
     return SphericalUNet(
         img_size=img_size,
@@ -58,6 +59,7 @@ def _small_unet(
         downsampling_mode=downsampling_mode,
         upsampling_mode=upsampling_mode,
         theta_cutoff=theta_cutoff,
+        unet_layout=unet_layout,  # type: ignore[arg-type]
     )
 
 
@@ -278,3 +280,68 @@ def test_theta_cutoff_none_uses_heuristic_not_uniform():
     ]
     assert cutoffs
     assert len(set(cutoffs)) > 1
+
+
+def test_default_layout_is_downsample_first():
+    model = _small_unet()
+    assert model.unet_layout == "downsample_first"
+    assert len(model.dblocks) == 3
+    assert len(model.ublocks) == 3
+    assert isinstance(model.stem, nn.Identity)
+
+
+def test_classic_forward_shape():
+    model = _small_unet(unet_layout="classic").to(fme.get_device())
+    x = torch.randn(2, 5, *SMALL_IMG, device=fme.get_device())
+    out = model(x)
+    assert out.shape == (2, 3, *SMALL_IMG)
+
+
+def test_classic_structure_n_process_n_minus_1_downs():
+    model = _small_unet(unet_layout="classic", embed_dims=[8, 16, 32])
+    assert model.unet_layout == "classic"
+    assert len(model.encoder_stages) == 3
+    assert len(model.downs) == 2
+    assert len(model.ups) == 2
+    assert len(model.decoder_stages) == 2
+    assert len(model.dblocks) == 0
+    assert len(model.ublocks) == 0
+    assert not isinstance(model.stem, nn.Identity)
+    assert model.level_shapes == [
+        SMALL_IMG,
+        (SMALL_IMG[0] // 2, SMALL_IMG[1] // 2),
+        (SMALL_IMG[0] // 4, SMALL_IMG[1] // 4),
+    ]
+    # Spatial-only downs keep channel width.
+    for i, down in enumerate(model.downs):
+        if isinstance(down, DiscreteContinuousConvS2):
+            assert down.weight.shape[0] == model.embed_dims[i]
+            assert down.groupsize * down.groups == model.embed_dims[i]
+
+
+def test_classic_theta_cutoff_per_level():
+    overrides: list[float | None] = [0.11, 0.22, 0.33]
+    model = _small_unet(unet_layout="classic", theta_cutoff=overrides)
+    assert model.theta_cutoff == overrides
+    for i, stage in enumerate(model.encoder_stages):
+        disco = [m for m in stage.modules() if isinstance(m, DiscreteContinuousConvS2)]
+        assert disco
+        for layer in disco:
+            assert layer.theta_cutoff == overrides[i]
+    stem_disco = [
+        m for m in model.stem.modules() if isinstance(m, DiscreteContinuousConvS2)
+    ]
+    if isinstance(model.stem, DiscreteContinuousConvS2):
+        stem_disco = [model.stem]
+    assert stem_disco
+    for layer in stem_disco:
+        assert layer.theta_cutoff == overrides[0]
+
+
+def test_classic_multi_basis_forward():
+    model = _small_unet(unet_layout="classic", filter_bases=MULTI_FILTER_BASES).to(
+        fme.get_device()
+    )
+    x = torch.randn(2, 5, *SMALL_IMG, device=fme.get_device())
+    out = model(x)
+    assert out.shape == (2, 3, *SMALL_IMG)

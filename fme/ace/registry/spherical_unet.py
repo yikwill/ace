@@ -12,7 +12,11 @@ from fme.core.models.spherical_unet import (
     SphericalUNet,
     SphericalUNetContextConfig,
 )
-from fme.core.models.spherical_unet.s2unet import BasisNormMode, FilterBasisType
+from fme.core.models.spherical_unet.s2unet import (
+    BasisNormMode,
+    FilterBasisType,
+    UnetLayout,
+)
 
 
 @dataclasses.dataclass
@@ -73,6 +77,7 @@ def _build_spherical_unet(
     layer_scale: bool = True,
     layer_scale_init: float = 0.1,
     theta_cutoff: list[float | None] | None = None,
+    unet_layout: UnetLayout = "downsample_first",
 ) -> SphericalUNet:
     return SphericalUNet(
         img_size=img_shape,
@@ -98,6 +103,7 @@ def _build_spherical_unet(
         layer_scale=layer_scale,
         layer_scale_init=layer_scale_init,
         theta_cutoff=theta_cutoff,
+        unet_layout=unet_layout,
     )
 
 
@@ -136,6 +142,8 @@ class SphericalUNetBuilder(ModuleConfig):
     # Per U-Net level DISCO cutoff (same length as embed_dims). None / omitted
     # entries use the kernel_shape/nlat heuristic at that level.
     theta_cutoff: list[float | None] | None = None
+    # downsample_first: historical encoder (default). classic: stem + process-then-down.
+    unet_layout: Literal["downsample_first", "classic"] = "downsample_first"
 
     def build(
         self,
@@ -170,6 +178,7 @@ class SphericalUNetBuilder(ModuleConfig):
             layer_scale=self.layer_scale,
             layer_scale_init=self.layer_scale_init,
             theta_cutoff=self.theta_cutoff,
+            unet_layout=self.unet_layout,
         )
 
 
@@ -211,6 +220,7 @@ class NoiseConditionedSphericalUNetBuilder(ModuleConfig):
     # Per U-Net level DISCO cutoff (same length as embed_dims). None / omitted
     # entries use the kernel_shape/nlat heuristic at that level.
     theta_cutoff: list[float | None] | None = None
+    unet_layout: Literal["downsample_first", "classic"] = "downsample_first"
 
     def build(
         self,
@@ -249,6 +259,7 @@ class NoiseConditionedSphericalUNetBuilder(ModuleConfig):
             layer_scale=self.layer_scale,
             layer_scale_init=self.layer_scale_init,
             theta_cutoff=self.theta_cutoff,
+            unet_layout=self.unet_layout,
         )
         if self.noise_type == "isotropic" and self.noise_embed_dim > 0:
             inverse_sht = InverseRealSHT(*dataset_info.img_shape, grid=self.grid)

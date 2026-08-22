@@ -36,6 +36,9 @@ FilterBasisType = Literal[
     "isotropic morlet",
 ]
 BasisNormMode = Literal["nodal", "modal", "mean", "support", "geometric", "none"]
+# downsample_first: today's encoder (down then process, N downs). classic: stem +
+# process-then-down with pre-down skips (N process stages, N-1 downs).
+UnetLayout = Literal["downsample_first", "classic"]
 
 
 @dataclasses.dataclass
@@ -477,6 +480,153 @@ class _TransposeConvNormActConv(nn.Module):
         return x
 
 
+class _ProcessStage(nn.Module):
+    """Same-resolution ConvNeXt stack; the first block may change channel width."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        in_shape: tuple[int, int],
+        grid: str,
+        nrep: int,
+        filter_bases: list[DiscoBasisSpec],
+        basis_norm_mode: BasisNormMode,
+        activation: type[nn.Module],
+        context_config: SphericalUNetContextConfig,
+        path_drop_rates: list[float],
+        mlp_ratio: float = 2.0,
+        mlp_drop_rate: float = 0.0,
+        layer_scale: bool = True,
+        layer_scale_init: float = 0.1,
+        theta_cutoff: float | None = None,
+    ):
+        super().__init__()
+        if len(path_drop_rates) != nrep:
+            raise ValueError(
+                f"path_drop_rates must have length nrep={nrep}, "
+                f"got {len(path_drop_rates)}"
+            )
+        self.in_shape = in_shape
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.grid = grid
+        self.fwd = nn.ModuleList()
+        for i in range(nrep):
+            layer_in = in_channels if i == 0 else out_channels
+            self.fwd.append(
+                _DiscoConvNeXtBlock(
+                    in_channels=layer_in,
+                    out_channels=out_channels,
+                    in_shape=in_shape,
+                    grid=grid,
+                    filter_bases=filter_bases,
+                    basis_norm_mode=basis_norm_mode,
+                    activation=activation,
+                    context_config=context_config,
+                    mlp_ratio=mlp_ratio,
+                    mlp_drop_rate=mlp_drop_rate,
+                    path_drop_rate=path_drop_rates[i],
+                    layer_scale=layer_scale,
+                    layer_scale_init=layer_scale_init,
+                    theta_cutoff=theta_cutoff,
+                )
+            )
+
+    def forward(self, x: torch.Tensor, context: Context | None = None) -> torch.Tensor:
+        block_context = _context_at_shape(context, self.in_shape)
+        for layer in self.fwd:
+            x = layer(x, block_context)
+        return x
+
+
+def _make_spatial_downsample(
+    channels: int,
+    in_shape: tuple[int, int],
+    out_shape: tuple[int, int],
+    filter_bases: list[DiscoBasisSpec],
+    basis_norm_mode: BasisNormMode,
+    grid_in: str,
+    grid_out: str,
+    downsampling_mode: str,
+    layer_scale_init: float,
+    theta_cutoff: float | None,
+) -> nn.Module:
+    """Resolution-only downsample; channel width is unchanged (classic UNet)."""
+    if downsampling_mode == "conv":
+        return _make_disco_conv(
+            channels,
+            channels,
+            in_shape=in_shape,
+            out_shape=out_shape,
+            filter_bases=filter_bases,
+            basis_norm_mode=basis_norm_mode,
+            grid_in=grid_in,
+            grid_out=grid_out,
+            nlat_for_cutoff=in_shape[0],
+            layer_scale_init=layer_scale_init,
+            bias=False,
+            theta_cutoff=theta_cutoff,
+        )
+    if downsampling_mode == "bilinear":
+        return ResampleS2(
+            nlat_in=in_shape[0],
+            nlon_in=in_shape[1],
+            nlat_out=out_shape[0],
+            nlon_out=out_shape[1],
+            grid_in=grid_in,
+            grid_out=grid_out,
+            mode="bilinear",
+        )
+    raise ValueError(
+        f"Unknown downsampling_mode {downsampling_mode!r}; "
+        "expected 'conv' or 'bilinear'"
+    )
+
+
+def _make_spatial_upsample(
+    channels: int,
+    in_shape: tuple[int, int],
+    out_shape: tuple[int, int],
+    filter_bases: list[DiscoBasisSpec],
+    basis_norm_mode: BasisNormMode,
+    grid_in: str,
+    grid_out: str,
+    upsampling_mode: str,
+    layer_scale_init: float,
+    theta_cutoff: float | None,
+) -> nn.Module:
+    """Resolution-only upsample; channel width is unchanged (classic UNet)."""
+    if upsampling_mode == "bilinear":
+        return ResampleS2(
+            nlat_in=in_shape[0],
+            nlon_in=in_shape[1],
+            nlat_out=out_shape[0],
+            nlon_out=out_shape[1],
+            grid_in=grid_in,
+            grid_out=grid_out,
+            mode="bilinear",
+        )
+    if upsampling_mode == "conv":
+        return _make_disco_transpose_conv(
+            channels,
+            channels,
+            in_shape=in_shape,
+            out_shape=out_shape,
+            filter_bases=filter_bases,
+            basis_norm_mode=basis_norm_mode,
+            grid_in=grid_in,
+            grid_out=grid_out,
+            nlat_for_cutoff=in_shape[0],
+            layer_scale_init=layer_scale_init,
+            bias=False,
+            theta_cutoff=theta_cutoff,
+        )
+    raise ValueError(
+        f"Unknown upsampling_mode {upsampling_mode!r}; " "expected 'bilinear' or 'conv'"
+    )
+
+
 class DownsamplingBlock(nn.Module):
     """Down block: DISCO downsample, then ConvNeXt blocks at lower resolution."""
 
@@ -522,7 +672,7 @@ class DownsamplingBlock(nn.Module):
         self.downsampling_mode = downsampling_mode
 
         if downsampling_mode == "conv":
-            # FCN3 encoder: DISCO conv changes resolution and channel width first.
+            # downsample_first: DISCO changes resolution and channel width first.
             self.downsample = _make_disco_conv(
                 in_channels,
                 out_channels,
@@ -756,7 +906,13 @@ class UpsamplingBlock(nn.Module):
 
 
 class SphericalUNet(nn.Module):
-    """Spherical U-Net with ConditionalLayerNorm (noise/labels/scalar only)."""
+    """Spherical U-Net with ConditionalLayerNorm (noise/labels/scalar only).
+
+    ``unet_layout="downsample_first"`` (default) keeps the historical encoder:
+    each level downsamples then processes (N downs). ``unet_layout="classic"``
+    uses a DISCO stem, process-then-down with pre-down skips, and N process
+    stages with only N-1 downs (textbook UNet ladder).
+    """
 
     def __init__(
         self,
@@ -783,6 +939,7 @@ class SphericalUNet(nn.Module):
         layer_scale: bool = True,
         layer_scale_init: float = 0.1,
         theta_cutoff: list[float | None] | None = None,
+        unet_layout: UnetLayout = "downsample_first",
     ):
         super().__init__()
 
@@ -790,6 +947,11 @@ class SphericalUNet(nn.Module):
             embed_dims = [64, 128, 256]
         if depths is None:
             depths = [2, 2, 2]
+        if unet_layout not in ("downsample_first", "classic"):
+            raise ValueError(
+                f"Unknown unet_layout {unet_layout!r}; "
+                "expected 'downsample_first' or 'classic'"
+            )
 
         self.img_size = img_size
         self.grid = grid
@@ -799,10 +961,12 @@ class SphericalUNet(nn.Module):
         self.embed_dims = embed_dims
         self.num_blocks = len(self.embed_dims)
         self.depths = depths
+        self.scale_factor = scale_factor
         self.kernel_shape = kernel_shape
         self.filter_bases = _resolve_filter_bases(
             filter_bases, filter_basis_type, kernel_shape
         )
+        self.filter_basis_norm_mode = filter_basis_norm_mode
         if context_config is None:
             context_config = _default_context_config()
         self.context_config = context_config
@@ -810,6 +974,10 @@ class SphericalUNet(nn.Module):
         self.mlp_drop_rate = mlp_drop_rate
         self.layer_scale = layer_scale
         self.layer_scale_init = layer_scale_init
+        self.downsampling_mode = downsampling_mode
+        self.upsampling_mode = upsampling_mode
+        self.transform_skip = transform_skip
+        self.unet_layout: UnetLayout = unet_layout
         self.theta_cutoff = _normalize_theta_cutoff_per_level(
             theta_cutoff, self.num_blocks
         )
@@ -829,20 +997,37 @@ class SphericalUNet(nn.Module):
         else:
             raise ValueError(f"Unknown activation function {activation_function}")
 
+        if unet_layout == "classic":
+            self._init_classic_blocks(path_drop_rate)
+        else:
+            self._init_downsample_first_blocks(path_drop_rate)
+
+        self.head = nn.Conv2d(
+            self.embed_dims[0], self.out_chans, kernel_size=1, bias=True
+        )
+        self.apply(self._init_weights)
+
+    def _init_downsample_first_blocks(self, path_drop_rate: float) -> None:
         dpr = [
             x.item() for x in torch.linspace(0, path_drop_rate, 2 * sum(self.depths))
         ]
         dpr_idx = 0
 
+        self.stem: nn.Module = nn.Identity()
+        self.encoder_stages = nn.ModuleList()
+        self.downs = nn.ModuleList()
+        self.ups = nn.ModuleList()
+        self.decoder_stages = nn.ModuleList()
+
         self.dblocks = nn.ModuleList()
-        out_shape = img_size
-        grid_in = grid
-        grid_out = grid_internal
-        in_channels = in_chans
+        out_shape = self.img_size
+        grid_in = self.grid
+        grid_out = self.grid_internal
+        in_channels = self.in_chans
         for i in range(self.num_blocks):
             out_shape_new = (
-                out_shape[0] // scale_factor,
-                out_shape[1] // scale_factor,
+                out_shape[0] // self.scale_factor,
+                out_shape[1] // self.scale_factor,
             )
             out_channels = self.embed_dims[i]
             n = self.depths[i]
@@ -858,21 +1043,21 @@ class SphericalUNet(nn.Module):
                     grid_out=grid_out,
                     nrep=n,
                     filter_bases=self.filter_bases,
-                    basis_norm_mode=filter_basis_norm_mode,
+                    basis_norm_mode=self.filter_basis_norm_mode,
                     activation=self.activation_function,
                     path_drop_rates=block_dpr,
-                    transform_skip=transform_skip,
-                    downsampling_mode=downsampling_mode,
-                    context_config=context_config,
-                    mlp_ratio=mlp_ratio,
-                    mlp_drop_rate=mlp_drop_rate,
-                    layer_scale=layer_scale,
-                    layer_scale_init=layer_scale_init,
+                    transform_skip=self.transform_skip,
+                    downsampling_mode=self.downsampling_mode,
+                    context_config=self.context_config,
+                    mlp_ratio=self.mlp_ratio,
+                    mlp_drop_rate=self.mlp_drop_rate,
+                    layer_scale=self.layer_scale,
+                    layer_scale_init=self.layer_scale_init,
                     theta_cutoff=self.theta_cutoff[i],
                 )
             )
             out_shape = out_shape_new
-            grid_in = grid_internal
+            grid_in = self.grid_internal
             in_channels = out_channels
 
         self.ublocks = nn.ModuleList()
@@ -900,24 +1085,150 @@ class SphericalUNet(nn.Module):
                     grid_out=block_grid_out,
                     nrep=n,
                     filter_bases=self.filter_bases,
-                    basis_norm_mode=filter_basis_norm_mode,
+                    basis_norm_mode=self.filter_basis_norm_mode,
                     activation=self.activation_function,
                     path_drop_rates=block_dpr,
-                    transform_skip=transform_skip,
-                    upsampling_mode=upsampling_mode,
-                    context_config=context_config,
-                    mlp_ratio=mlp_ratio,
-                    mlp_drop_rate=mlp_drop_rate,
-                    layer_scale=layer_scale,
-                    layer_scale_init=layer_scale_init,
+                    transform_skip=self.transform_skip,
+                    upsampling_mode=self.upsampling_mode,
+                    context_config=self.context_config,
+                    mlp_ratio=self.mlp_ratio,
+                    mlp_drop_rate=self.mlp_drop_rate,
+                    layer_scale=self.layer_scale,
+                    layer_scale_init=self.layer_scale_init,
                     theta_cutoff=self.theta_cutoff[i],
                 )
             )
 
-        self.head = nn.Conv2d(
-            self.embed_dims[0], self.out_chans, kernel_size=1, bias=True
+    def _init_classic_blocks(self, path_drop_rate: float) -> None:
+        # Encoder uses all depths; decoder uses depths for levels 0..N-2 only.
+        n_enc = sum(self.depths)
+        n_dec = sum(self.depths[i] for i in range(self.num_blocks - 1))
+        n_drop = max(n_enc + n_dec, 1)
+        dpr = [x.item() for x in torch.linspace(0, path_drop_rate, n_drop)]
+        dpr_idx = 0
+
+        # Historical attrs unused in classic forward; keep empty for a stable API.
+        self.dblocks = nn.ModuleList()
+        self.ublocks = nn.ModuleList()
+
+        self.stem = _make_disco_conv(
+            self.in_chans,
+            self.embed_dims[0],
+            in_shape=self.img_size,
+            out_shape=self.img_size,
+            filter_bases=self.filter_bases,
+            basis_norm_mode=self.filter_basis_norm_mode,
+            grid_in=self.grid,
+            grid_out=self.grid,
+            nlat_for_cutoff=self.img_size[0],
+            layer_scale_init=self.layer_scale_init,
+            bias=False,
+            theta_cutoff=self.theta_cutoff[0],
         )
-        self.apply(self._init_weights)
+
+        self.encoder_stages = nn.ModuleList()
+        self.downs = nn.ModuleList()
+        self.level_shapes: list[tuple[int, int]] = []
+        shape = self.img_size
+        grid = self.grid
+        in_channels = self.embed_dims[0]
+        for i in range(self.num_blocks):
+            out_channels = self.embed_dims[i]
+            n = self.depths[i]
+            block_dpr = dpr[dpr_idx : dpr_idx + n]
+            dpr_idx += n
+            # Level 0 is already E0 after the stem; later levels map E_{i-1} → E_i.
+            stage_in = in_channels
+            self.encoder_stages.append(
+                _ProcessStage(
+                    in_channels=stage_in,
+                    out_channels=out_channels,
+                    in_shape=shape,
+                    grid=grid,
+                    nrep=n,
+                    filter_bases=self.filter_bases,
+                    basis_norm_mode=self.filter_basis_norm_mode,
+                    activation=self.activation_function,
+                    context_config=self.context_config,
+                    path_drop_rates=block_dpr,
+                    mlp_ratio=self.mlp_ratio,
+                    mlp_drop_rate=self.mlp_drop_rate,
+                    layer_scale=self.layer_scale,
+                    layer_scale_init=self.layer_scale_init,
+                    theta_cutoff=self.theta_cutoff[i],
+                )
+            )
+            self.level_shapes.append(shape)
+            if i < self.num_blocks - 1:
+                out_shape = (
+                    shape[0] // self.scale_factor,
+                    shape[1] // self.scale_factor,
+                )
+                grid_out = self.grid_internal
+                self.downs.append(
+                    _make_spatial_downsample(
+                        out_channels,
+                        in_shape=shape,
+                        out_shape=out_shape,
+                        filter_bases=self.filter_bases,
+                        basis_norm_mode=self.filter_basis_norm_mode,
+                        grid_in=grid,
+                        grid_out=grid_out,
+                        downsampling_mode=self.downsampling_mode,
+                        layer_scale_init=self.layer_scale_init,
+                        theta_cutoff=self.theta_cutoff[i],
+                    )
+                )
+                shape = out_shape
+                grid = grid_out
+                in_channels = out_channels
+
+        self.ups = nn.ModuleList()
+        self.decoder_stages = nn.ModuleList()
+        # Deepest-first ups: land on levels N-2, ..., 0.
+        for i in range(self.num_blocks - 2, -1, -1):
+            in_shape = self.level_shapes[i + 1]
+            out_shape = self.level_shapes[i]
+            # Full-res level keeps input grid; coarser levels use grid_internal.
+            grid_in = self.grid if (i + 1) == 0 else self.grid_internal
+            grid_out = self.grid if i == 0 else self.grid_internal
+            up_channels = self.embed_dims[i + 1]
+            self.ups.append(
+                _make_spatial_upsample(
+                    up_channels,
+                    in_shape=in_shape,
+                    out_shape=out_shape,
+                    filter_bases=self.filter_bases,
+                    basis_norm_mode=self.filter_basis_norm_mode,
+                    grid_in=grid_in,
+                    grid_out=grid_out,
+                    upsampling_mode=self.upsampling_mode,
+                    layer_scale_init=self.layer_scale_init,
+                    theta_cutoff=self.theta_cutoff[i],
+                )
+            )
+            n = self.depths[i]
+            block_dpr = dpr[dpr_idx : dpr_idx + n]
+            dpr_idx += n
+            self.decoder_stages.append(
+                _ProcessStage(
+                    in_channels=self.embed_dims[i] + self.embed_dims[i + 1],
+                    out_channels=self.embed_dims[i],
+                    in_shape=out_shape,
+                    grid=grid_out,
+                    nrep=n,
+                    filter_bases=self.filter_bases,
+                    basis_norm_mode=self.filter_basis_norm_mode,
+                    activation=self.activation_function,
+                    context_config=self.context_config,
+                    path_drop_rates=block_dpr,
+                    mlp_ratio=self.mlp_ratio,
+                    mlp_drop_rate=self.mlp_drop_rate,
+                    layer_scale=self.layer_scale,
+                    layer_scale_init=self.layer_scale_init,
+                    theta_cutoff=self.theta_cutoff[i],
+                )
+            )
 
     def _init_weights(self, m: nn.Module) -> None:
         if isinstance(m, nn.Conv2d):
@@ -928,7 +1239,9 @@ class SphericalUNet(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x: torch.Tensor, context: Context | None = None) -> torch.Tensor:
+    def _forward_downsample_first(
+        self, x: torch.Tensor, context: Context | None
+    ) -> torch.Tensor:
         block_context = _context_at_shape(context, self.img_size)
         features = []
         feat = x
@@ -943,3 +1256,26 @@ class SphericalUNet(nn.Module):
             ufeat = ublock(torch.cat([feat, ufeat], dim=1), block_context)
 
         return self.head(ufeat)
+
+    def _forward_classic(
+        self, x: torch.Tensor, context: Context | None
+    ) -> torch.Tensor:
+        feat = self.stem(x)
+        skips: list[torch.Tensor] = []
+        for i, stage in enumerate(self.encoder_stages):
+            feat = stage(feat, context)
+            if i < self.num_blocks - 1:
+                skips.append(feat)
+                feat = self.downs[i](feat)
+
+        # skips are shallow→deep; pair with deepest-first ups/decoder_stages.
+        for up, dec, skip in zip(self.ups, self.decoder_stages, reversed(skips)):
+            feat = up(feat)
+            feat = dec(torch.cat([skip, feat], dim=1), context)
+
+        return self.head(feat)
+
+    def forward(self, x: torch.Tensor, context: Context | None = None) -> torch.Tensor:
+        if self.unet_layout == "classic":
+            return self._forward_classic(x, context)
+        return self._forward_downsample_first(x, context)
