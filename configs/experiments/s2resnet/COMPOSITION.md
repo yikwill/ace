@@ -14,15 +14,25 @@ Modular `fix/` / `feature/` branches target `main`; everything under **Exp-only*
 | `fix/inference-persistent-workers` | Inference DataLoader: `persistent_workers` only when `num_data_workers > 0` | — |
 | `fix/irfft-autograd` | Functional DC/Nyquist imag clearing in `fme/fft.py` (multi-step autograd) | — |
 | `feature/spherical-unet` | `SphericalUNet` / `NoiseConditionedSphericalUNet` + ACE registry + tests (includes optional DISCO `theta_cutoff`) | — |
-| `feature/spherical-resnet` | `SphericalResNet` / `NoiseConditionedSphericalResNet` + ACE registry + tests | **`feature/spherical-unet`** (shared spherical helpers) |
+| `feature/spherical-resnet` | `SphericalResNet` / `NoiseConditionedSphericalResNet` + ACE registry + tests | **`feature/spherical-unet`** (shared registry files; merge unet first) |
 | `feature/get-stats-time-chunked` | Time-chunked `get_stats` (`time_chunk_size`, `include_variables`, `max_time_samples`, `--force`, `DASK_NUM_WORKERS`) | — |
 
-### Main merge order
+### Merge into `main`
 
 1. Fixes (`fix/inference-persistent-workers`, `fix/irfft-autograd`) — any order.
 2. `feature/spherical-unet`
-3. `feature/spherical-resnet` (must follow spherical-unet)
+3. `feature/spherical-resnet` (after spherical-unet)
 4. `feature/get-stats-time-chunked` — any time relative to the above.
+
+### Reconstruct merges
+
+Merge-order dependency (not a git stack — merge **both** unet and resnet):
+
+1. `fix/inference-persistent-workers`
+2. `fix/irfft-autograd`
+3. `feature/spherical-unet`
+4. `feature/spherical-resnet`
+5. `feature/get-stats-time-chunked` — any time after step 4.
 
 ## Exp-only (do not PR to main as-is)
 
