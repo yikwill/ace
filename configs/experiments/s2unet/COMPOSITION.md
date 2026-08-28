@@ -16,15 +16,16 @@ Modular `fix/` / `feature/` branches target `main`; everything under **Exp-only*
 | `feature/spherical-unet` | `SphericalUNet` / `NoiseConditionedSphericalUNet` model + ACE registry + tests (optional DISCO `theta_cutoff`; opt-in `unet_layout: classic`) | — |
 | `feature/ar-input-noise` | Training-time AR input noise: `TrainStepperConfig.ar_input_noise_sigma` scales prognostic state noise by `|true Δ|` after each train step | — |
 | `feature/residual-std-scale` | Opt-in `scale_residual_by_residual_std`: prognostic residual add uses `σ_res/σ_full` so the network predicts in residual units | — |
-| `feature/spatial-mean-normalization` | Spatial means in `NormalizationConfig` (e.g. `time-mean.nc`) plus optional `scalar_means_path` / `scalar_means_names` overrides for static fields | — |
+| `feature/full-field-prognostics` | Opt-in `full_field_prognostic_names`: selected prognostics stay full-field under `residual_prediction` (skip residual add and residual loss stats) | **`feature/residual-std-scale`** |
+| `feature/spatial-mean-normalization` | Spatial means in `NormalizationConfig` plus optional `scalar_means_path` / `scalar_means_names` and inverse `spatial_means_path` / `spatial_means_names` overrides | — |
 
 ### Merge into `main`
 
-Any order.
+Any order among independent leaves. For the residual-std-scale → full-field-prognostics stack, merge `feature/residual-std-scale` then `feature/full-field-prognostics` (or the stack tip after the parent is on `main`).
 
 ### Reconstruct merges
 
-Any order — all modular branches in the table above.
+Any order among independent leaves; for the residual-std-scale → full-field-prognostics stack, merge `feature/full-field-prognostics` only (tip).
 
 ## Exp-only (do not PR to main as-is)
 
@@ -35,6 +36,7 @@ Any order — all modular branches in the table above.
 - `configs/experiments/s2unet/config-train-era5-residual-prediction-res-scaled-classic.yaml`
 - `configs/experiments/s2unet/config-train-era5-classic-time-mean-centering.yaml`
 - `configs/experiments/s2unet/config-train-era5-residual-prediction-classic-time-mean-centering.yaml`
+- `configs/experiments/s2unet/config-train-era5-residual-prediction-classic-pressfc-full-field.yaml`
 - `configs/experiments/s2unet/config-train-era5-sfno-baseline.yaml`
 - `fme/core/distributed/torch_distributed.py`: global `broadcast_buffers=False` for DDP (DISCO/SHT buffer workaround). Needs a narrower design before any `fix/` PR.
 - This file (`COMPOSITION.md`)
@@ -52,7 +54,7 @@ git fetch yikwill-ace-fork \
   fix/irfft-autograd \
   feature/spherical-unet \
   feature/ar-input-noise \
-  feature/residual-std-scale \
+  feature/full-field-prognostics \
   feature/spatial-mean-normalization
 
 git checkout -B exp/s2unet origin/main
@@ -60,7 +62,7 @@ git merge --no-ff yikwill-ace-fork/fix/inference-persistent-workers
 git merge --no-ff yikwill-ace-fork/fix/irfft-autograd
 git merge --no-ff yikwill-ace-fork/feature/spherical-unet
 git merge --no-ff yikwill-ace-fork/feature/ar-input-noise
-git merge --no-ff yikwill-ace-fork/feature/residual-std-scale
+git merge --no-ff yikwill-ace-fork/feature/full-field-prognostics
 git merge --no-ff yikwill-ace-fork/feature/spatial-mean-normalization
 # Then replay exp-only tip commits from yikwill-ace-fork/exp/s2unet
 # (configs + DDP hack + this COMPOSITION.md), or cherry-pick those commits.
