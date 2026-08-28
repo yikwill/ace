@@ -70,6 +70,11 @@ class SingleModuleStepConfig(StepConfigABC):
             predicts in residual units (x_next = x + r_net * σ_res). Requires
             residual_prediction and normalization.residual. Default False
             keeps x_next = x + r_net * σ_full.
+        full_field_prognostic_names: Prognostic (in ∩ out) names that stay
+            full-field when residual_prediction is True. Remaining prognostics
+            still get the residual add; these names also keep network (not
+            residual) loss stats. Empty default keeps all prognostics residual.
+            Requires residual_prediction if non-empty.
         include_channel_mask_inputs: Whether to append per-variable mask indicator
             channels to the network input. When True, the network receives
             ``len(in_names)`` additional float channels (1.0 = present, 0.0 =
@@ -98,6 +103,7 @@ class SingleModuleStepConfig(StepConfigABC):
     prescribed_prognostic_names: list[str] = dataclasses.field(default_factory=list)
     residual_prediction: bool = False
     scale_residual_by_residual_std: bool = False
+    full_field_prognostic_names: list[str] = dataclasses.field(default_factory=list)
     include_channel_mask_inputs: bool = False
     global_mean_removal: GlobalMeanRemovalConfigUnion | None = None
     input_dropout: VariableMaskingConfig | None = None
@@ -112,6 +118,21 @@ class SingleModuleStepConfig(StepConfigABC):
             if self.normalization.residual is None:
                 raise ValueError(
                     "scale_residual_by_residual_std requires normalization.residual"
+                )
+        if self.full_field_prognostic_names:
+            if not self.residual_prediction:
+                raise ValueError(
+                    "full_field_prognostic_names requires residual_prediction=True"
+                )
+            unknown = [
+                n
+                for n in self.full_field_prognostic_names
+                if n not in self.prognostic_names
+            ]
+            if unknown:
+                raise ValueError(
+                    "full_field_prognostic_names must be prognostic "
+                    f"(in ∩ out). Not prognostic: {unknown}"
                 )
         if self.global_mean_removal is not None:
             self.global_mean_removal.validate_names(self.in_names, self.out_names)
@@ -159,7 +180,9 @@ class SingleModuleStepConfig(StepConfigABC):
             extra_residual_scaled_names = []
         return self.normalization.get_loss_normalizer(
             names=self._normalize_names + extra_names,
-            residual_scaled_names=self.prognostic_names + extra_residual_scaled_names,
+            residual_scaled_names=(
+                self.residual_prognostic_names + extra_residual_scaled_names
+            ),
         )
 
     @classmethod
@@ -193,6 +216,12 @@ class SingleModuleStepConfig(StepConfigABC):
     def diagnostic_names(self) -> list[str]:
         """Names of variables which are outputs only."""
         return list(set(self.output_names).difference(self.in_names))
+
+    @property
+    def residual_prognostic_names(self) -> list[str]:
+        """Prognostics that receive the residual add (excludes full-field ones)."""
+        exclude = set(self.full_field_prognostic_names)
+        return [n for n in self.prognostic_names if n not in exclude]
 
     @property
     def output_names(self) -> list[str]:
@@ -468,7 +497,7 @@ class SingleModuleStep(StepABC):
             corrector=self._corrector,
             ocean=self.ocean,
             residual_prediction=self._config.residual_prediction,
-            prognostic_names=self.prognostic_names,
+            prognostic_names=self._config.residual_prognostic_names,
             prescribed_prognostic_names=self._config.prescribed_prognostic_names,
             residual_add_scales=self._residual_add_scales,
             global_mean_removal=self._global_mean_removal,
@@ -629,7 +658,7 @@ def _residual_add_scales(
         return None
     loss_normalizer = config.get_loss_normalizer()
     scales: TensorDict = {}
-    for name in config.prognostic_names:
+    for name in config.residual_prognostic_names:
         if name not in network_normalizer.stds:
             raise ValueError(
                 "scale_residual_by_residual_std: prognostic "

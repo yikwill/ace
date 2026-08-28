@@ -2366,3 +2366,110 @@ def test_step_with_adjustments_scales_prognostic_residual_not_diagnostic():
     torch.testing.assert_close(scaled["c"], torch.full_like(x, sigma_full))
     # default residual add: x + r_net * σ_full = 1 + 2
     torch.testing.assert_close(unscaled["a"], torch.full_like(x, 3.0))
+
+
+def test_full_field_prognostic_names_requires_residual_prediction():
+    with pytest.raises(ValueError, match="residual_prediction=True"):
+        _dummy_single_module_config(full_field_prognostic_names=["a"])
+
+
+def test_full_field_prognostic_names_must_be_prognostic():
+    with pytest.raises(ValueError, match="must be prognostic"):
+        _dummy_single_module_config(
+            in_names=["a"],
+            out_names=["a", "c"],
+            residual_prediction=True,
+            full_field_prognostic_names=["c"],
+        )
+
+
+def test_residual_prognostic_names_excludes_full_field():
+    config = _dummy_single_module_config(
+        in_names=["a", "b"],
+        out_names=["a", "b", "c"],
+        residual_prediction=True,
+        full_field_prognostic_names=["b"],
+        normalization=NetworkAndLossNormalizationConfig(
+            network=NormalizationConfig(
+                means={"a": 0.0, "b": 0.0, "c": 0.0},
+                stds={"a": 2.0, "b": 3.0, "c": 4.0},
+            ),
+            residual=NormalizationConfig(
+                means={"a": 0.0, "b": 0.0},
+                stds={"a": 0.5, "b": 0.25},
+            ),
+        ),
+    )
+    assert set(config.prognostic_names) == {"a", "b"}
+    assert set(config.residual_prognostic_names) == {"a"}
+
+    loss = config.get_loss_normalizer()
+    torch.testing.assert_close(loss.stds["a"].cpu(), torch.tensor(0.5))
+    torch.testing.assert_close(loss.stds["b"].cpu(), torch.tensor(3.0))
+    torch.testing.assert_close(loss.stds["c"].cpu(), torch.tensor(4.0))
+
+
+def test_residual_add_scales_skips_full_field_prognostics():
+    names = ["a", "b"]
+    config = _dummy_single_module_config(
+        in_names=names,
+        out_names=names,
+        residual_prediction=True,
+        scale_residual_by_residual_std=True,
+        full_field_prognostic_names=["b"],
+        normalization=NetworkAndLossNormalizationConfig(
+            network=NormalizationConfig(
+                means={"a": 0.0, "b": 0.0}, stds={"a": 2.0, "b": 4.0}
+            ),
+            residual=NormalizationConfig(
+                means={"a": 0.0},
+                stds={"a": 0.5},
+            ),
+        ),
+    )
+    network_normalizer = config.normalization.get_network_normalizer(names)
+    scales = _residual_add_scales(config, network_normalizer)
+    assert scales is not None
+    assert set(scales) == {"a"}
+    expected = torch.tensor(0.25, device=scales["a"].device)
+    torch.testing.assert_close(scales["a"], expected)
+
+
+def test_step_with_adjustments_full_field_prognostic_not_added():
+    """Residual a is added; full-field b and diagnostic c are denormalized as-is."""
+    device = fme.get_device()
+    sigma_full = 2.0
+    x = torch.ones(2, 4, 4, device=device)
+    normalizer = StandardNormalizer(
+        means={
+            "a": torch.tensor(0.0),
+            "b": torch.tensor(0.0),
+            "c": torch.tensor(0.0),
+        },
+        stds={
+            "a": torch.tensor(sigma_full),
+            "b": torch.tensor(sigma_full),
+            "c": torch.tensor(sigma_full),
+        },
+    )
+
+    def network_calls(input_norm: TensorDict) -> TensorDict:
+        ones = torch.ones_like(input_norm["a"])
+        return {"a": ones, "b": ones, "c": ones}
+
+    output = step_with_adjustments(
+        input={"a": x.clone(), "b": x.clone()},
+        next_step_input_data={},
+        network_calls=network_calls,
+        normalizer=normalizer,
+        corrector=None,
+        ocean=None,
+        residual_prediction=True,
+        prognostic_names=["a"],
+    ).output
+
+    # residual: x + r_net * σ_full = 1 + 2
+    torch.testing.assert_close(output["a"], torch.full_like(x, 3.0))
+    # full-field prognostic and diagnostic: denorm(r_net) = 2, not added to input
+    torch.testing.assert_close(output["b"], torch.full_like(x, sigma_full))
+    torch.testing.assert_close(output["c"], torch.full_like(x, sigma_full))
