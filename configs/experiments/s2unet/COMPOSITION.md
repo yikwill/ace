@@ -7,18 +7,24 @@ Modular `fix/` / `feature/` branches target `main`; everything under **Exp-only*
 
 - `origin/main` @ `05c5a050f168d64ebcfef50ca0a8317f17246d2f`
 
-## Modular branches (independent — any order into main)
+## Modular branches
 
-No inter-branch dependencies. Merge into `main` in any order.
+| Branch | Role | Depends on |
+|--------|------|------------|
+| `fix/inference-persistent-workers` | Inference DataLoader: `persistent_workers` only when `num_data_workers > 0` | — |
+| `fix/irfft-autograd` | Functional DC/Nyquist imag clearing in `fme/fft.py` (multi-step autograd) | — |
+| `feature/spherical-unet` | `SphericalUNet` / `NoiseConditionedSphericalUNet` model + ACE registry + tests (optional DISCO `theta_cutoff`; opt-in `unet_layout: classic`) | — |
+| `feature/ar-input-noise` | Training-time AR input noise: `TrainStepperConfig.ar_input_noise_sigma` scales prognostic state noise by `|true Δ|` after each train step | — |
+| `feature/residual-std-scale` | Opt-in `scale_residual_by_residual_std`: prognostic residual add uses `σ_res/σ_full` so the network predicts in residual units | — |
+| `feature/spatial-mean-normalization` | Spatial means in `NormalizationConfig` (e.g. `time-mean.nc`) plus optional `scalar_means_path` / `scalar_means_names` overrides for static fields | — |
 
-| Branch | Role |
-|--------|------|
-| `fix/inference-persistent-workers` | Inference DataLoader: `persistent_workers` only when `num_data_workers > 0` |
-| `fix/irfft-autograd` | Functional DC/Nyquist imag clearing in `fme/fft.py` (multi-step autograd) |
-| `feature/spherical-unet` | `SphericalUNet` / `NoiseConditionedSphericalUNet` model + ACE registry + tests (optional DISCO `theta_cutoff`; opt-in `unet_layout: classic`) |
-| `feature/ar-input-noise` | Training-time AR input noise: `TrainStepperConfig.ar_input_noise_sigma` scales prognostic state noise by `|true Δ|` after each train step |
-| `feature/residual-std-scale` | Opt-in `scale_residual_by_residual_std`: prognostic residual add uses `σ_res/σ_full` so the network predicts in residual units |
-| `feature/spatial-mean-normalization` | Spatial means in `NormalizationConfig` (e.g. `time-mean.nc`) plus optional `scalar_means_path` / `scalar_means_names` overrides for static fields |
+### Merge into `main`
+
+Any order.
+
+### Reconstruct merges
+
+Any order — all modular branches in the table above.
 
 ## Exp-only (do not PR to main as-is)
 
