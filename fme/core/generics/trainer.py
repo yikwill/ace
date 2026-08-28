@@ -50,10 +50,12 @@
 
 import abc
 import contextlib
+import ctypes
 import dataclasses
 import gc
 import logging
 import os
+import sys
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -86,6 +88,87 @@ from fme.core.timing import GlobalTimer
 from fme.core.training_history import TrainingJob
 from fme.core.typing_ import Slice
 from fme.core.wandb import WandB
+
+
+def _rss_bytes() -> int | None:
+    """Current process RSS from /proc, or None if unavailable."""
+    try:
+        with open("/proc/self/status", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return None
+
+
+def _cgroup_memory_bytes() -> int | None:
+    """Job/cgroup memory.current, or None if unavailable.
+
+    Process RSS misses DataLoader workers. 56778553 logged ~10 GiB/rank
+    while the node cgroup was ~188 GiB of a ~224 GiB limit.
+    """
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("0::"):
+                    rel = line.strip().split("::", 1)[1]
+                    path = os.path.join(
+                        "/sys/fs/cgroup", rel.lstrip("/"), "memory.current"
+                    )
+                    with open(path, encoding="utf-8") as mf:
+                        return int(mf.read().strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        with open("/sys/fs/cgroup/memory.current", encoding="utf-8") as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _malloc_trim() -> bool:
+    """Return unused glibc heap to the OS. No-op off Linux.
+
+    Python GC frees objects but glibc arenas stay in RSS. Dual PI+PD inline
+    inference spikes host RAM; without trim the next epoch allocates on top of
+    unreclaimed arenas and hits the Perlmutter GPU-node cgroup (~224 GiB).
+    """
+    if sys.platform != "linux":
+        return False
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        return bool(libc.malloc_trim(0))
+    except (OSError, AttributeError):
+        return False
+
+
+def trim_host_memory() -> None:
+    """Drop leftover figures, GC, and return glibc heap to the OS."""
+    try:
+        import matplotlib.pyplot as plt
+
+        plt.close("all")
+    except ImportError:
+        pass
+    gc.collect()
+    before = _rss_bytes()
+    trimmed = _malloc_trim()
+    after = _rss_bytes()
+    cgroup = _cgroup_memory_bytes()
+    if before is not None and after is not None:
+        extra = ""
+        if cgroup is not None:
+            extra = f", cgroup={cgroup / (1024**3):.2f} GiB"
+        logging.info(
+            "Host RSS %.2f → %.2f GiB after gc/malloc_trim (trimmed=%s%s)",
+            before / (1024**3),
+            after / (1024**3),
+            trimmed,
+            extra,
+        )
+    else:
+        logging.info("Host RSS trim ran (malloc_trim=%s)", trimmed)
 
 
 class EndOfBatchCallback(Protocol):
@@ -444,12 +527,17 @@ class Trainer:
             all_logs = valid_logs | inference_logs | {"epoch": self._epochs_trained}
             wandb = WandB.get_instance()
             wandb.log(all_logs, step=self.num_batches_seen)
+            if self._do_gc_collect:
+                del all_logs, valid_logs, inference_logs
+                trim_host_memory()
 
         while self._epochs_trained < segment_max_epochs:
             if self._do_gc_collect:
                 # garbage collect to avoid CUDA error in some contexts
                 # https://github.com/pytorch/pytorch/issues/67978#issuecomment-1661986812  # noqa: E501
-                gc.collect()
+                # malloc_trim returns the inference RSS spike to the OS; GC
+                # alone leaves glibc arenas in the process and the cgroup OOMs.
+                trim_host_memory()
             logging.info(
                 f"Beginning epoch after {self._epochs_trained} complete epochs"
             )
@@ -518,6 +606,9 @@ class Trainer:
                 all_logs["epoch_inference_seconds"] = inference_end - valid_end
             wandb = WandB.get_instance()
             wandb.log(all_logs, step=self.num_batches_seen)
+            if self._do_gc_collect:
+                del all_logs, train_summary, valid_logs, inference_logs, additional_logs
+                trim_host_memory()
 
             if self._should_save_checkpoints():
                 logging.info(f"Saving checkpoints for epoch {self._epochs_trained}")
@@ -616,8 +707,21 @@ class Trainer:
             ):
                 self._save_restart_checkpoints()
                 self._last_saved_num_batches_seen = self.num_batches_seen
+        # Restart ckpt before train-eval so short smoke epochs (and prod
+        # epochs whose length is not a multiple of checkpoint_every_n_batches)
+        # still hit the ~7GB host spike that sits next to train-eval.
+        if (
+            self._should_save_checkpoints()
+            and self.num_batches_seen > self._last_saved_num_batches_seen
+        ):
+            self._save_restart_checkpoints()
+            self._last_saved_num_batches_seen = self.num_batches_seen
         # evaluate after training on an independent shuffle of the data
         self.train_data.alternate_shuffle()
+        # All ranks: return heap before train-eval. The in-loop ckpt save trims
+        # rank 0 only; 56778553 was cgroup-OOM'd ~50s later in this loop.
+        if self._do_gc_collect:
+            trim_host_memory()
         aggregator = self._aggregator_builder.get_train_aggregator()
         self.stepper.set_eval()
         self.stepper.seed_eval(seed=0)
@@ -636,6 +740,11 @@ class Trainer:
             and self.num_batches_seen > self._last_saved_num_batches_seen
         ):
             self._save_restart_checkpoints()  # before incrementing epoch so we will validate after resuming  # noqa: E501
+        # All ranks: return unused heap before validation. Rank-0's latest
+        # ckpt (~7GB with optimizer) plus train-eval leave glibc arenas that
+        # otherwise sit in RSS and stack into the GPU-node cgroup (~224 GiB).
+        if self._do_gc_collect:
+            trim_host_memory()
         # we will save restart checkpoints again after validation/inference
         # are recorded to wandb
         self._epochs_trained += 1
@@ -715,9 +824,14 @@ class Trainer:
                 data["ema"].pop("ema_params")  # don't need if not saving optimization
             torch.save(data, temporary_location)
             os.replace(temporary_location, checkpoint_path)
+            # Drop the in-memory blob so glibc can return it; latest ckpt with
+            # optimizer is ~7GB and validation starts right after this save.
+            del data
         finally:
             if os.path.exists(temporary_location):
                 os.remove(temporary_location)
+        if self._do_gc_collect:
+            trim_host_memory()
 
     def restore_checkpoint(self, checkpoint_path):
         """
