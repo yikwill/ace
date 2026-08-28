@@ -496,6 +496,72 @@ def test_scalar_means_path_requires_names():
         )
 
 
+def test_spatial_means_override_scalar_means(tmp_path):
+    """Selected fields use 2D time-mean maps while others stay scalar."""
+    lat, lon = 2, 3
+    spatial = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon)
+    mean_ds = xr.Dataset(
+        {
+            "prog": np.float32(1.0),
+            "press": np.float32(0.0),
+        }
+    )
+    spatial_ds = xr.Dataset(
+        {"press": (("lat", "lon"), spatial), "prog": (("lat", "lon"), spatial + 10.0)}
+    )
+    std_ds = xr.Dataset({"prog": np.float32(2.0), "press": np.float32(4.0)})
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    spatial_ds.to_netcdf(tmp_path / "spatial.nc")
+    std_ds.to_netcdf(tmp_path / "std.nc")
+
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "std.nc",
+        spatial_means_path=tmp_path / "spatial.nc",
+        spatial_means_names=["press"],
+    ).build(["prog", "press"])
+    assert normalizer.means["prog"].ndim == 0
+    assert float(normalizer.means["prog"]) == 1.0
+    assert tuple(normalizer.means["press"].shape) == (lat, lon)
+    torch.testing.assert_close(
+        normalizer.means["press"].cpu(), torch.as_tensor(spatial)
+    )
+
+    config = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "std.nc",
+        spatial_means_path=tmp_path / "spatial.nc",
+        spatial_means_names=["press"],
+    )
+    config.load()
+    assert config.means["prog"] == 1.0
+    assert isinstance(config.means["press"], np.ndarray)
+    assert config.means["press"].shape == (lat, lon)
+    assert config.spatial_means_path is None
+    assert config.spatial_means_names == []
+
+
+def test_spatial_means_path_requires_names():
+    with pytest.raises(ValueError, match="spatial_means_names"):
+        NormalizationConfig(
+            global_means_path="/means.nc",
+            global_stds_path="/stds.nc",
+            spatial_means_path="/spatial.nc",
+        )
+
+
+def test_scalar_and_spatial_means_names_must_not_overlap():
+    with pytest.raises(ValueError, match="must not overlap"):
+        NormalizationConfig(
+            global_means_path="/means.nc",
+            global_stds_path="/stds.nc",
+            scalar_means_path="/scalar.nc",
+            scalar_means_names=["press"],
+            spatial_means_path="/spatial.nc",
+            spatial_means_names=["press"],
+        )
+
+
 def test_denormalize_fill_nans_with_spatial_means():
     means = move_tensordict_to_device({"a": torch.tensor([[1.0, 2.0], [3.0, 4.0]])})
     stds = move_tensordict_to_device({"a": torch.tensor(1.0)})
