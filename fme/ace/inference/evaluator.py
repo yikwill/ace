@@ -349,11 +349,19 @@ def run_evaluator_from_config(config: InferenceEvaluatorConfig):
         initial_condition_requirements = (
             stepper_config.get_prognostic_state_data_requirements()
         )
+        ocean = stepper_config.get_ocean()
         data = get_inference_data(
             config=config.loader,
             total_forward_steps=config.n_forward_steps,
             window_requirements=window_requirements,
             initial_condition=initial_condition_requirements,
+            # SST perturbations need ocean field names from the stepper.
+            surface_temperature_name=(
+                ocean.surface_temperature_name if ocean is not None else None
+            ),
+            ocean_fraction_name=(
+                ocean.ocean_fraction_name if ocean is not None else None
+            ),
         )
         if config.n_ensemble_per_ic > 1:
             ic = data.initial_condition.as_batch_data()
@@ -453,6 +461,12 @@ def run_evaluator_from_config(config: InferenceEvaluatorConfig):
             total_forward_steps=config.n_forward_steps,
             window_requirements=window_requirements,
             initial_condition=initial_condition_requirements,
+            surface_temperature_name=(
+                ocean.surface_temperature_name if ocean is not None else None
+            ),
+            ocean_fraction_name=(
+                ocean.ocean_fraction_name if ocean is not None else None
+            ),
         )
         if config.n_ensemble_per_ic > 1:
             ic = prediction_data.initial_condition.as_batch_data()

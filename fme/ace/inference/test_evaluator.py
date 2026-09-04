@@ -22,6 +22,7 @@ from fme.ace.data_loading.inference import (
     InferenceDataLoaderConfig,
     InferenceInitialConditionIndices,
 )
+from fme.ace.data_loading.perturbation import PerturbationSelector, SSTPerturbation
 from fme.ace.inference.data_writer import DataWriterConfig
 from fme.ace.inference.data_writer.file_writer import FileWriterConfig
 from fme.ace.inference.data_writer.time_coarsen import TimeCoarsenConfig
@@ -1635,3 +1636,62 @@ def test_inference_with_validation(tmp_path: pathlib.Path, validation_config_kwa
         ), f"Inference metrics should still be present"
 
     assert os.path.isdir(tmp_path / "validation")
+
+
+def test_evaluator_sst_perturbation_uses_stepper_ocean(tmp_path: pathlib.Path):
+    """Evaluator must pass stepper ocean names so loader SST perturbations apply."""
+    in_names = ["surface_temperature", "ocean_fraction"]
+    out_names = ["surface_temperature"]
+    stepper_path = tmp_path / "stepper"
+    n_forward_steps = 2
+    horizontal = [DimSize("lat", 4), DimSize("lon", 8)]
+    dim_sizes = DimSizes(
+        n_time=n_forward_steps + 1,
+        horizontal=horizontal,
+        nz_interface=4,
+    )
+    save_plus_one_stepper(
+        stepper_path,
+        in_names,
+        out_names,
+        mean=0.0,
+        std=1.0,
+        data_shape=dim_sizes.shape_nd,
+        ocean=OceanConfig(
+            surface_temperature_name="surface_temperature",
+            ocean_fraction_name="ocean_fraction",
+        ),
+    )
+    data = FV3GFSData(
+        path=tmp_path,
+        names=list(set(in_names).union(out_names)),
+        dim_sizes=dim_sizes,
+        timestep_days=TIMESTEP.total_seconds() / 86400,
+        save_vertical_coordinate=False,
+    )
+    loader = dataclasses.replace(
+        data.inference_data_loader_config,
+        perturbations=SSTPerturbation(
+            sst=[PerturbationSelector(type="constant", config={"amplitude": 2.0})]
+        ),
+    )
+    config = InferenceEvaluatorConfig(
+        experiment_dir=str(tmp_path),
+        n_forward_steps=n_forward_steps,
+        checkpoint_path=str(stepper_path),
+        logging=LoggingConfig(
+            log_to_screen=True, log_to_file=False, log_to_wandb=False
+        ),
+        loader=loader,
+        aggregator=InferenceEvaluatorAggregatorConfig(),
+        data_writer=DataWriterConfig(
+            save_prediction_files=False,
+            save_monthly_files=False,
+        ),
+        forward_steps_in_memory=1,
+        allow_incompatible_dataset=True,
+    )
+    config_filename = tmp_path / "config.yaml"
+    with open(config_filename, "w") as f:
+        yaml.dump(dataclasses.asdict(config), f)
+    main(yaml_config=str(config_filename))
