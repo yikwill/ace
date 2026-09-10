@@ -17,8 +17,7 @@ Modular `fix/` / `feature/` branches target `main`; everything under **Exp-only*
 | `feature/ar-input-noise` | Training-time AR input noise: `TrainStepperConfig.ar_input_noise_sigma` scales prognostic state noise by `|true Δ|` after each train step | — |
 | `feature/residual-std-scale` | Opt-in `scale_residual_by_residual_std`: prognostic residual add uses `σ_res/σ_full` so the network predicts in residual units | — |
 | `feature/full-field-prognostics` | Opt-in `full_field_prognostic_names`: selected prognostics stay full-field under `residual_prediction` (skip residual add and residual loss stats) | **`feature/residual-std-scale`** |
-| `feature/spatial-mean-normalization` | Spatial means in `NormalizationConfig` plus optional `scalar_means_path` / `scalar_means_names` and inverse `spatial_means_path` / `spatial_means_names` overrides | — |
-| `feature/std-normalization-overrides` | `scalar_stds_path` / `spatial_stds_path` overrides so selected fields can use residual or spatial stds in network normalization | **`feature/spatial-mean-normalization`** |
+| `feature/normalization-stat-overrides` | Spatial stats in `NormalizationConfig` plus `means_overrides` / `stds_overrides` lists (`{path, names}`) so selected fields can mix a time-mean map with residual std | — |
 | `fix/evaluator-sst-perturbation` | Evaluator `get_inference_data` forwards stepper ocean field names so loader SST perturbations can apply | — |
 
 ### Merge into `main`
@@ -26,14 +25,13 @@ Modular `fix/` / `feature/` branches target `main`; everything under **Exp-only*
 Any order among independent leaves. Stacks (parent then child, or stack tip after the parent is on `main`):
 
 1. `feature/residual-std-scale` then `feature/full-field-prognostics`
-2. `feature/spatial-mean-normalization` then `feature/std-normalization-overrides`
 
 ### Reconstruct merges
 
 Any order among independent leaves; for stacks merge the tip only:
 
 - `feature/full-field-prognostics` (contains `feature/residual-std-scale`)
-- `feature/std-normalization-overrides` (contains `feature/spatial-mean-normalization`)
+- `feature/normalization-stat-overrides`
 
 ## Exp-only (do not PR to main as-is)
 
@@ -70,7 +68,7 @@ git fetch yikwill-ace-fork \
   feature/spherical-unet \
   feature/ar-input-noise \
   feature/full-field-prognostics \
-  feature/std-normalization-overrides \
+  feature/normalization-stat-overrides \
   fix/evaluator-sst-perturbation
 
 git checkout -B exp/s2unet origin/main
@@ -79,7 +77,7 @@ git merge --no-ff yikwill-ace-fork/fix/irfft-autograd
 git merge --no-ff yikwill-ace-fork/feature/spherical-unet
 git merge --no-ff yikwill-ace-fork/feature/ar-input-noise
 git merge --no-ff yikwill-ace-fork/feature/full-field-prognostics
-git merge --no-ff yikwill-ace-fork/feature/std-normalization-overrides
+git merge --no-ff yikwill-ace-fork/feature/normalization-stat-overrides
 git merge --no-ff yikwill-ace-fork/fix/evaluator-sst-perturbation
 # Then replay exp-only tip commits from yikwill-ace-fork/exp/s2unet
 # (configs + DDP hack + this COMPOSITION.md), or cherry-pick those commits.

@@ -138,12 +138,12 @@ stepper:
           # PRESsfc is a full-field prognostic: 2D time-mean + residual std.
           global_means_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/centering.nc
           global_stds_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/scaling-full-field.nc
-          spatial_means_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/time-mean.nc
-          spatial_means_names:
-            - PRESsfc
-          scalar_stds_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/scaling-residual.nc
-          scalar_stds_names:
-            - PRESsfc
+          means_overrides:
+            - path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/time-mean.nc
+              names: [PRESsfc]
+          stds_overrides:
+            - path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/scaling-residual.nc
+              names: [PRESsfc]
         residual:
           global_means_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/centering.nc
           global_stds_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/scaling-residual.nc
