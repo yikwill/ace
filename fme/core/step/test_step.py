@@ -2405,7 +2405,9 @@ def test_residual_prognostic_names_excludes_full_field():
 
     loss = config.get_loss_normalizer()
     torch.testing.assert_close(loss.stds["a"].cpu(), torch.tensor(0.5))
-    torch.testing.assert_close(loss.stds["b"].cpu(), torch.tensor(3.0))
+    # Full-field prognostics still use residual loss stats; only diagnostics
+    # keep network stds.
+    torch.testing.assert_close(loss.stds["b"].cpu(), torch.tensor(0.25))
     torch.testing.assert_close(loss.stds["c"].cpu(), torch.tensor(4.0))
 
 
@@ -2422,8 +2424,8 @@ def test_residual_add_scales_skips_full_field_prognostics():
                 means={"a": 0.0, "b": 0.0}, stds={"a": 2.0, "b": 4.0}
             ),
             residual=NormalizationConfig(
-                means={"a": 0.0},
-                stds={"a": 0.5},
+                means={"a": 0.0, "b": 0.0},
+                stds={"a": 0.5, "b": 1.0},
             ),
         ),
     )
