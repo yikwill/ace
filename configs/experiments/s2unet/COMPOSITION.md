@@ -48,8 +48,10 @@ Any order among independent leaves; for stacks merge the tip only:
 - `configs/experiments/s2unet/config-infer-era5-1996-1997-sst-p2k.yaml`
 - `configs/experiments/s2unet/config-infer-era5-1996-1997-sst-p4k.yaml`
 - `configs/experiments/s2unet/config-train-era5-classic-pressfc-time-mean.yaml`
+- `configs/experiments/s2unet/config-train-era5-classic-pressfc-time-mean-residual-std.yaml`
 - `configs/experiments/s2unet/config-train-era5-residual-prediction-classic-time-mean-centering.yaml`
 - `configs/experiments/s2unet/config-train-era5-residual-prediction-classic-pressfc-full-field.yaml`
+- `configs/experiments/s2unet/config-train-era5-residual-prediction-classic-pressfc-full-field-residual-std.yaml`
 - `configs/experiments/s2unet/config-train-era5-sfno-baseline.yaml`
 - `fme/core/distributed/torch_distributed.py`: global `broadcast_buffers=False` for DDP (DISCO/SHT buffer workaround). Needs a narrower design before any `fix/` PR.
 - This file (`COMPOSITION.md`)

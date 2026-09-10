@@ -132,15 +132,11 @@ stepper:
           upsampling_mode: bilinear
       normalization:
         network:
-          # Scalar mean/std for all variables. PRESsfc uses 2D time-mean centering
-          # and residual std so the network channel is weather-scale, not orography.
+          # Scalar mean for all variables; PRESsfc overridden to 2D time-mean below.
           global_means_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/centering.nc
           global_stds_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/scaling-full-field.nc
           spatial_means_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/time-mean.nc
           spatial_means_names:
-            - PRESsfc
-          scalar_stds_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/scaling-residual.nc
-          scalar_stds_names:
             - PRESsfc
         residual:
           global_means_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/centering.nc
