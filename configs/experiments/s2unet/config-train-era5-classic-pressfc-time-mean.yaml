@@ -30,7 +30,7 @@ inference:
         data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets
         file_pattern: 2026-03-19-era5-1deg-8layer-1940-2025.zarr
         engine: zarr
-      num_data_workers: 4
+      num_data_workers: 2
     aggregator:
       histogram:
         enabled: true
@@ -43,8 +43,8 @@ logging:
   entity: yikwill-university-of-washington
 train_loader:
   batch_size: 16
-  num_data_workers: 4
-  prefetch_factor: 4
+  num_data_workers: 2
+  prefetch_factor: 2
   dataset:
     concat:
     - data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets
@@ -66,8 +66,8 @@ train_loader:
 validation:
   loader:
     batch_size: 64
-    num_data_workers: 4
-    prefetch_factor: 4
+    num_data_workers: 2
+    prefetch_factor: 2
     dataset:
       data_path: /global/cfs/projectdirs/e3sm/yikwill/datasets
       file_pattern: 2026-03-19-era5-1deg-8layer-1940-2025.zarr
@@ -109,9 +109,6 @@ stepper:
   step:
     type: single_module
     config:
-      residual_prediction: true
-      full_field_prognostic_names:
-        - PRESsfc
       builder:
         type: NoiseConditionedSphericalUNet
         config:
@@ -135,7 +132,8 @@ stepper:
           upsampling_mode: bilinear
       normalization:
         network:
-          # PRESsfc is a full-field prognostic: 2D time-mean + residual std.
+          # Scalar mean/std for all variables. PRESsfc uses 2D time-mean centering
+          # and residual std so the network channel is weather-scale, not orography.
           global_means_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/centering.nc
           global_stds_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/scaling-full-field.nc
           spatial_means_path: /global/cfs/projectdirs/e3sm/yikwill/datasets/2026-03-19-era5-1deg-8layer-stats-1990-2019/time-mean.nc
