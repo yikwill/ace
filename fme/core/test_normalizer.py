@@ -3,8 +3,10 @@ import pathlib
 import tempfile
 
 import dacite
+import numpy as np
 import pytest
 import torch
+import xarray as xr
 
 from fme.ace.testing.fv3gfs_data import get_scalar_dataset
 from fme.core.device import move_tensordict_to_device
@@ -13,6 +15,7 @@ from fme.core.normalizer import (
     NormalizationConfig,
     NormalizeFn,
     StandardNormalizer,
+    StatFileOverride,
     _combine_normalizers,
 )
 
@@ -397,3 +400,291 @@ def test_can_create_config_without_files():
         global_means_path="/not/a/real/path",
         global_stds_path="/not/a/real/path",
     )
+
+
+def test_spatial_means_normalize_and_roundtrip_state(tmp_path):
+    lat, lon = 4, 8
+    spatial_mean = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon)
+    mean_ds = xr.Dataset({"a": (("lat", "lon"), spatial_mean)})
+    std_ds = xr.Dataset({"a": np.float32(2.0)})
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    std_ds.to_netcdf(tmp_path / "std.nc")
+
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "std.nc",
+    ).build(["a"])
+    assert tuple(normalizer.means["a"].shape) == (lat, lon)
+
+    data = {"a": torch.zeros(2, lat, lon)}
+    data = move_tensordict_to_device(data)
+    normalized = normalizer.normalize(data)
+    expected = (data["a"] - normalizer.means["a"]) / normalizer.stds["a"]
+    torch.testing.assert_close(normalized["a"], expected)
+
+    restored = StandardNormalizer.from_state(normalizer.get_state())
+    restored.means = move_tensordict_to_device(restored.means)
+    restored.stds = move_tensordict_to_device(restored.stds)
+    torch.testing.assert_close(restored.normalize(data)["a"], normalized["a"])
+
+
+def test_load_keeps_spatial_means(tmp_path):
+    spatial_mean = np.ones((3, 5), dtype=np.float32)
+    mean_ds = xr.Dataset({"a": (("lat", "lon"), spatial_mean), "b": np.float32(1.0)})
+    std_ds = xr.Dataset({"a": np.float32(2.0), "b": np.float32(3.0)})
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    std_ds.to_netcdf(tmp_path / "std.nc")
+
+    config = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "std.nc",
+    )
+    config.load()
+    assert isinstance(config.means["a"], np.ndarray)
+    assert config.means["a"].shape == (3, 5)
+    assert config.means["b"] == 1.0
+
+    normalizer = config.build(["a", "b"])
+    assert tuple(normalizer.means["a"].shape) == (3, 5)
+    assert normalizer.means["b"].ndim == 0
+
+
+def test_means_overrides_scalar_over_spatial_default(tmp_path):
+    """Constants keep scalar centering while other fields use spatial means."""
+    lat, lon = 2, 3
+    spatial = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon)
+    mean_ds = xr.Dataset(
+        {
+            "prog": (("lat", "lon"), spatial),
+            "const": (("lat", "lon"), spatial + 10.0),
+        }
+    )
+    scalar_ds = xr.Dataset({"const": np.float32(7.0), "prog": np.float32(0.0)})
+    std_ds = xr.Dataset({"prog": np.float32(2.0), "const": np.float32(4.0)})
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    scalar_ds.to_netcdf(tmp_path / "scalar.nc")
+    std_ds.to_netcdf(tmp_path / "std.nc")
+
+    override = StatFileOverride(path=tmp_path / "scalar.nc", names=["const"])
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "std.nc",
+        means_overrides=[override],
+    ).build(["prog", "const"])
+    assert tuple(normalizer.means["prog"].shape) == (lat, lon)
+    assert normalizer.means["const"].ndim == 0
+    assert float(normalizer.means["const"]) == 7.0
+
+    config = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "std.nc",
+        means_overrides=[override],
+    )
+    config.load()
+    assert isinstance(config.means["prog"], np.ndarray)
+    assert config.means["const"] == 7.0
+    assert config.means_overrides == []
+    assert config.global_means_path is None
+
+
+def test_means_overrides_spatial_over_scalar_default(tmp_path):
+    """Selected fields use 2D time-mean maps while others stay scalar."""
+    lat, lon = 2, 3
+    spatial = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon)
+    mean_ds = xr.Dataset(
+        {
+            "prog": np.float32(1.0),
+            "press": np.float32(0.0),
+        }
+    )
+    spatial_ds = xr.Dataset(
+        {"press": (("lat", "lon"), spatial), "prog": (("lat", "lon"), spatial + 10.0)}
+    )
+    std_ds = xr.Dataset({"prog": np.float32(2.0), "press": np.float32(4.0)})
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    spatial_ds.to_netcdf(tmp_path / "spatial.nc")
+    std_ds.to_netcdf(tmp_path / "std.nc")
+
+    override = StatFileOverride(path=tmp_path / "spatial.nc", names=["press"])
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "std.nc",
+        means_overrides=[override],
+    ).build(["prog", "press"])
+    assert normalizer.means["prog"].ndim == 0
+    assert float(normalizer.means["prog"]) == 1.0
+    assert tuple(normalizer.means["press"].shape) == (lat, lon)
+    torch.testing.assert_close(
+        normalizer.means["press"].cpu(), torch.as_tensor(spatial)
+    )
+
+    config = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "std.nc",
+        means_overrides=[override],
+    )
+    config.load()
+    assert config.means["prog"] == 1.0
+    assert isinstance(config.means["press"], np.ndarray)
+    assert config.means["press"].shape == (lat, lon)
+    assert config.means_overrides == []
+
+
+def test_stds_overrides_residual_over_full_field(tmp_path):
+    """Selected fields take residual/anomaly stds; others keep full-field stds."""
+    mean_ds = xr.Dataset({"prog": np.float32(1.0), "press": np.float32(0.0)})
+    full_std_ds = xr.Dataset({"prog": np.float32(2.0), "press": np.float32(40.0)})
+    residual_std_ds = xr.Dataset({"press": np.float32(5.0), "prog": np.float32(99.0)})
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    full_std_ds.to_netcdf(tmp_path / "full_std.nc")
+    residual_std_ds.to_netcdf(tmp_path / "residual_std.nc")
+
+    override = StatFileOverride(path=tmp_path / "residual_std.nc", names=["press"])
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "full_std.nc",
+        stds_overrides=[override],
+    ).build(["prog", "press"])
+    assert float(normalizer.stds["prog"]) == 2.0
+    assert float(normalizer.stds["press"]) == 5.0
+
+    config = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "full_std.nc",
+        stds_overrides=[override],
+    )
+    config.load()
+    assert config.stds["prog"] == 2.0
+    assert config.stds["press"] == 5.0
+    assert config.stds_overrides == []
+
+
+def test_spatial_means_with_residual_stds(tmp_path):
+    """PRESsfc-style: 2D time-mean centering with residual std, others scalar."""
+    lat, lon = 2, 3
+    spatial = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon)
+    mean_ds = xr.Dataset({"prog": np.float32(1.0), "press": np.float32(0.0)})
+    spatial_ds = xr.Dataset({"press": (("lat", "lon"), spatial)})
+    full_std_ds = xr.Dataset({"prog": np.float32(2.0), "press": np.float32(40.0)})
+    residual_std_ds = xr.Dataset({"press": np.float32(5.0)})
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    spatial_ds.to_netcdf(tmp_path / "spatial.nc")
+    full_std_ds.to_netcdf(tmp_path / "full_std.nc")
+    residual_std_ds.to_netcdf(tmp_path / "residual_std.nc")
+
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "full_std.nc",
+        means_overrides=[
+            StatFileOverride(path=tmp_path / "spatial.nc", names=["press"])
+        ],
+        stds_overrides=[
+            StatFileOverride(path=tmp_path / "residual_std.nc", names=["press"])
+        ],
+    ).build(["prog", "press"])
+    assert normalizer.means["prog"].ndim == 0
+    assert float(normalizer.means["prog"]) == 1.0
+    assert tuple(normalizer.means["press"].shape) == (lat, lon)
+    assert float(normalizer.stds["prog"]) == 2.0
+    assert float(normalizer.stds["press"]) == 5.0
+
+    data = move_tensordict_to_device({"press": torch.zeros(lat, lon) + 10.0})
+    normalized = normalizer.normalize(data)
+    mean = torch.as_tensor(spatial, device=data["press"].device)
+    expected = (data["press"] - mean) / 5.0
+    torch.testing.assert_close(normalized["press"], expected)
+
+
+def test_stds_overrides_spatial_over_scalar(tmp_path):
+    lat, lon = 2, 3
+    spatial_std = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon) + 1.0
+    mean_ds = xr.Dataset({"prog": np.float32(0.0), "press": np.float32(0.0)})
+    full_std_ds = xr.Dataset({"prog": np.float32(2.0), "press": np.float32(40.0)})
+    spatial_std_ds = xr.Dataset(
+        {"press": (("lat", "lon"), spatial_std), "prog": (("lat", "lon"), spatial_std)}
+    )
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    full_std_ds.to_netcdf(tmp_path / "full_std.nc")
+    spatial_std_ds.to_netcdf(tmp_path / "spatial_std.nc")
+
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "full_std.nc",
+        stds_overrides=[
+            StatFileOverride(path=tmp_path / "spatial_std.nc", names=["press"])
+        ],
+    ).build(["prog", "press"])
+    assert float(normalizer.stds["prog"]) == 2.0
+    assert tuple(normalizer.stds["press"].shape) == (lat, lon)
+    torch.testing.assert_close(
+        normalizer.stds["press"].cpu(), torch.as_tensor(spatial_std)
+    )
+
+
+def test_stat_file_override_requires_names():
+    with pytest.raises(ValueError, match="non-empty names"):
+        StatFileOverride(path="/means.nc", names=[])
+
+
+def test_overrides_require_path_mode():
+    with pytest.raises(ValueError, match="require global_means_path"):
+        NormalizationConfig(
+            means={"a": 0.0},
+            stds={"a": 1.0},
+            means_overrides=[StatFileOverride(path="/other.nc", names=["a"])],
+        )
+
+
+def test_duplicate_names_in_means_overrides():
+    with pytest.raises(ValueError, match="duplicate names in means_overrides"):
+        NormalizationConfig(
+            global_means_path="/means.nc",
+            global_stds_path="/stds.nc",
+            means_overrides=[
+                StatFileOverride(path="/a.nc", names=["press"]),
+                StatFileOverride(path="/b.nc", names=["press"]),
+            ],
+        )
+
+
+def test_duplicate_names_in_stds_overrides():
+    with pytest.raises(ValueError, match="duplicate names in stds_overrides"):
+        NormalizationConfig(
+            global_means_path="/means.nc",
+            global_stds_path="/stds.nc",
+            stds_overrides=[
+                StatFileOverride(path="/a.nc", names=["press"]),
+                StatFileOverride(path="/b.nc", names=["press", "prog"]),
+            ],
+        )
+
+
+def test_overrides_from_dict_roundtrip():
+    config = NormalizationConfig(
+        global_means_path="/means.nc",
+        global_stds_path="/stds.nc",
+        means_overrides=[StatFileOverride(path="/time-mean.nc", names=["PRESsfc"])],
+        stds_overrides=[StatFileOverride(path="/residual.nc", names=["PRESsfc"])],
+    )
+    round_tripped = dacite.from_dict(
+        NormalizationConfig,
+        data=dataclasses.asdict(config),
+        config=dacite.Config(strict=True),
+    )
+    assert config == round_tripped
+
+
+def test_denormalize_fill_nans_with_spatial_means():
+    means = move_tensordict_to_device({"a": torch.tensor([[1.0, 2.0], [3.0, 4.0]])})
+    stds = move_tensordict_to_device({"a": torch.tensor(1.0)})
+    normalizer = StandardNormalizer(
+        means=means,
+        stds=stds,
+        fill_nans_on_denormalize=True,
+    )
+    tensors = move_tensordict_to_device(
+        {"a": torch.tensor([[float("nan"), 0.0], [1.0, float("nan")]])}
+    )
+    out = normalizer.denormalize(tensors)
+    expected = move_tensordict_to_device({"a": torch.tensor([[1.0, 2.0], [4.0, 4.0]])})
+    torch.testing.assert_close(out["a"], expected["a"])

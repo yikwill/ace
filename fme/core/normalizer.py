@@ -1,6 +1,6 @@
 import dataclasses
 import pathlib
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from copy import copy
 from typing import Protocol
 
@@ -11,6 +11,21 @@ import xarray as xr
 
 from fme.core.device import move_tensordict_to_device
 from fme.core.typing_ import TensorDict, TensorMapping
+
+
+@dataclasses.dataclass
+class StatFileOverride:
+    """Replace stats for named variables from another netCDF file.
+
+    Rank is taken from the file: scalars or spatial maps are both allowed.
+    """
+
+    path: str | pathlib.Path
+    names: list[str]
+
+    def __post_init__(self):
+        if not self.names:
+            raise ValueError("StatFileOverride requires a non-empty names list")
 
 
 @dataclasses.dataclass
@@ -26,6 +41,11 @@ class NormalizationConfig:
         global_stds_path: Path to a netCDF file containing global stds.
         means: Mapping from variable names to means.
         stds: Mapping from variable names to stds.
+        means_overrides: Optional per-variable mean files. After loading
+            ``global_means_path``, each entry replaces ``names`` from ``path``
+            (e.g. a 2D time-mean for PRESsfc while others stay scalar).
+        stds_overrides: Optional per-variable std files, independent of
+            ``means_overrides`` (e.g. residual std for a 2D-centered field).
         fill_nans_on_normalize: Whether to fill NaNs during normalization. If
             true, on normalization NaNs in the denormalized input become zeros in
             the normalized output.
@@ -36,8 +56,14 @@ class NormalizationConfig:
 
     global_means_path: str | pathlib.Path | None = None
     global_stds_path: str | pathlib.Path | None = None
-    means: Mapping[str, float] = dataclasses.field(default_factory=dict)
-    stds: Mapping[str, float] = dataclasses.field(default_factory=dict)
+    means: Mapping[str, float | list | np.ndarray] = dataclasses.field(
+        default_factory=dict
+    )
+    stds: Mapping[str, float | list | np.ndarray] = dataclasses.field(
+        default_factory=dict
+    )
+    means_overrides: list[StatFileOverride] = dataclasses.field(default_factory=list)
+    stds_overrides: list[StatFileOverride] = dataclasses.field(default_factory=list)
     fill_nans_on_normalize: bool = False
     fill_nans_on_denormalize: bool = False
 
@@ -56,6 +82,13 @@ class NormalizationConfig:
                 "Must use either global_means_path and global_stds_path "
                 "or explicit means and stds."
             )
+        if (self.means_overrides or self.stds_overrides) and not using_path:
+            raise ValueError(
+                "means_overrides and stds_overrides require global_means_path "
+                "and global_stds_path (cannot combine with explicit means/stds)"
+            )
+        _forbid_duplicate_override_names(self.means_overrides, "means_overrides")
+        _forbid_duplicate_override_names(self.stds_overrides, "stds_overrides")
 
     def load(self):
         """
@@ -71,15 +104,19 @@ class NormalizationConfig:
                 names=None,
                 defaults={"x": 0.0, "y": 0.0, "z": 0.0},
             )
+            _apply_stat_overrides(means, self.means_overrides)
             stds = load_dict_from_netcdf(
                 self.global_stds_path,
                 names=None,
                 defaults={"x": 1.0, "y": 1.0, "z": 1.0},
             )
+            _apply_stat_overrides(stds, self.stds_overrides)
             self.means = means
             self.stds = stds
             self.global_means_path = None
             self.global_stds_path = None
+            self.means_overrides = []
+            self.stds_overrides = []
 
     def build(self, names: list[str]):
         using_path = (
@@ -90,6 +127,8 @@ class NormalizationConfig:
                 global_means_path=self.global_means_path,
                 global_stds_path=self.global_stds_path,
                 names=names,
+                means_overrides=self.means_overrides,
+                stds_overrides=self.stds_overrides,
                 fill_nans_on_normalize=self.fill_nans_on_normalize,
                 fill_nans_on_denormalize=self.fill_nans_on_denormalize,
             )
@@ -179,8 +218,8 @@ class StandardNormalizer:
         Returns state as a serializable data structure.
         """
         return {
-            "means": {k: float(v.cpu().numpy().item()) for k, v in self.means.items()},
-            "stds": {k: float(v.cpu().numpy().item()) for k, v in self.stds.items()},
+            "means": {k: _stat_to_serializable(v) for k, v in self.means.items()},
+            "stds": {k: _stat_to_serializable(v) for k, v in self.stds.items()},
             "fill_nans_on_normalize": self._fill_nans_on_normalize,
             "fill_nans_on_denormalize": self._fill_nans_on_denormalize,
         }
@@ -203,8 +242,8 @@ class StandardNormalizer:
 
     def get_normalization_config(self) -> NormalizationConfig:
         return NormalizationConfig(
-            means={k: float(v.cpu().numpy().item()) for k, v in self.means.items()},
-            stds={k: float(v.cpu().numpy().item()) for k, v in self.stds.items()},
+            means={k: _stat_to_serializable(v) for k, v in self.means.items()},
+            stds={k: _stat_to_serializable(v) for k, v in self.stds.items()},
             fill_nans_on_normalize=self.fill_nans_on_normalize,
             fill_nans_on_denormalize=self.fill_nans_on_denormalize,
         )
@@ -236,57 +275,107 @@ def _denormalize(
     denormalized = {k: t * stds[k] + means[k] for k, t in tensors.items()}
     if fill_nans:
         for k, v in denormalized.items():
+            # means[k] may be spatial; zeros_like broadcasts the fill to v's shape
             denormalized[k] = torch.where(
-                torch.isnan(v), torch.full_like(v, fill_value=means[k]), v
+                torch.isnan(v), means[k] + torch.zeros_like(v), v
             )
     return denormalized
 
 
+def _forbid_duplicate_override_names(
+    overrides: Sequence[StatFileOverride], attr: str
+) -> None:
+    seen: set[str] = set()
+    for override in overrides:
+        overlap = seen.intersection(override.names)
+        if overlap:
+            raise ValueError(
+                f"duplicate names in {attr}: {sorted(overlap)}. "
+                "Each variable may appear in at most one override."
+            )
+        seen.update(override.names)
+
+
+def _apply_stat_overrides(
+    stats: dict[str, float | np.ndarray],
+    overrides: Sequence[StatFileOverride],
+    requested_names: Iterable[str] | None = None,
+) -> None:
+    """Overwrite mean or std entries from optional per-variable netCDF files."""
+    requested = None if requested_names is None else set(requested_names)
+    for override in overrides:
+        names = list(override.names)
+        if requested is not None:
+            names = [n for n in names if n in requested]
+        if names:
+            stats.update(load_dict_from_netcdf(override.path, names, defaults={}))
+
+
 def get_normalizer(
-    global_means_path, global_stds_path, names: list[str], **normalizer_kwargs
+    global_means_path,
+    global_stds_path,
+    names: list[str],
+    means_overrides: Sequence[StatFileOverride] | None = None,
+    stds_overrides: Sequence[StatFileOverride] | None = None,
+    **normalizer_kwargs,
 ) -> StandardNormalizer:
     means = load_dict_from_netcdf(
         global_means_path, names, defaults={"x": 0.0, "y": 0.0, "z": 0.0}
     )
+    _apply_stat_overrides(means, means_overrides or [], requested_names=names)
     means = {k: torch.as_tensor(v, dtype=torch.float) for k, v in means.items()}
     stds = load_dict_from_netcdf(
         global_stds_path, names, defaults={"x": 1.0, "y": 1.0, "z": 1.0}
     )
+    _apply_stat_overrides(stds, stds_overrides or [], requested_names=names)
     stds = {k: torch.as_tensor(v, dtype=torch.float) for k, v in stds.items()}
     return StandardNormalizer(means=means, stds=stds, **normalizer_kwargs)
+
+
+def _stat_to_serializable(tensor: torch.Tensor) -> float | list:
+    """Convert a mean/std tensor to a JSON/torch-save friendly Python value."""
+    array = tensor.detach().cpu().numpy()
+    if array.ndim == 0:
+        return float(array.item())
+    return array.tolist()
 
 
 def load_dict_from_netcdf(
     path: str | pathlib.Path,
     names: Iterable[str] | None,
     defaults: Mapping[str, float | np.ndarray],
-) -> dict[str, float]:
+) -> dict[str, float | np.ndarray]:
     """
-    Load a dictionary of scalar variables from a netCDF file.
+    Load a dictionary of normalization statistics from a netCDF file.
+
+    Values may be scalars or arrays. Spatially varying means (e.g. a time-mean
+    map) are returned as float32 numpy arrays and broadcast against data tensors
+    during normalize/denormalize.
 
     Args:
         path: Path to the netCDF file.
-        names: List of variable names to load. If None, all variables in the netCDF
-            file are loaded.
+        names: List of variable names to load. If None, all data variables in the
+            netCDF file are loaded (coordinates are excluded).
         defaults: Dictionary of default values for each variable, if not found
             in the netCDF file.
     """
     with fsspec.open(path, "rb") as f:
         ds = xr.load_dataset(f, mask_and_scale=False)
 
-    result = {}
+    result: dict[str, float | np.ndarray] = {}
     if names is None:
-        names = set(ds.variables.keys()).union(defaults.keys())
-        skip_non_scalar = True
-    else:
-        skip_non_scalar = False
+        # data_vars omits lat/lon coordinates; keep spatial data vars (time means)
+        names = set(ds.data_vars).union(defaults.keys())
     for c in names:
         if c in ds.variables:
-            if skip_non_scalar and ds.variables[c].ndim > 0:
-                continue
-            result[c] = float(ds.variables[c].values.item())
+            values = np.asarray(ds.variables[c].values)
+            if values.ndim == 0:
+                result[c] = float(values.item())
+            else:
+                result[c] = values.astype(np.float32, copy=False)
         elif c in defaults:
-            result[c] = float(defaults[c])
+            default = defaults[c]
+            result[c] = float(default) if np.ndim(default) == 0 else np.asarray(default)
         else:
             raise ValueError(f"Variable {c} not found in {path}")
     ds.close()
