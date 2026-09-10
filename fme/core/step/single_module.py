@@ -72,8 +72,10 @@ class SingleModuleStepConfig(StepConfigABC):
             keeps x_next = x + r_net * σ_full.
         full_field_prognostic_names: Prognostic (in ∩ out) names that stay
             full-field when residual_prediction is True. Remaining prognostics
-            still get the residual add; these names also keep network (not
-            residual) loss stats. Empty default keeps all prognostics residual.
+            still get the residual add (and residual-std add scaling). Loss
+            still uses residual stats for all prognostics, including these
+            names — prediction mode is independent of MSE weighting.
+            Empty default keeps all prognostics residual.
             Requires residual_prediction if non-empty.
         include_channel_mask_inputs: Whether to append per-variable mask indicator
             channels to the network input. When True, the network receives
@@ -180,9 +182,7 @@ class SingleModuleStepConfig(StepConfigABC):
             extra_residual_scaled_names = []
         return self.normalization.get_loss_normalizer(
             names=self._normalize_names + extra_names,
-            residual_scaled_names=(
-                self.residual_prognostic_names + extra_residual_scaled_names
-            ),
+            residual_scaled_names=(self.prognostic_names + extra_residual_scaled_names),
         )
 
     @classmethod
