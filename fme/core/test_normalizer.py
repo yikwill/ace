@@ -562,6 +562,126 @@ def test_scalar_and_spatial_means_names_must_not_overlap():
         )
 
 
+def test_scalar_stds_override_full_field_stds(tmp_path):
+    """Selected fields take residual/anomaly stds; others keep full-field stds."""
+    mean_ds = xr.Dataset({"prog": np.float32(1.0), "press": np.float32(0.0)})
+    full_std_ds = xr.Dataset({"prog": np.float32(2.0), "press": np.float32(40.0)})
+    residual_std_ds = xr.Dataset({"press": np.float32(5.0), "prog": np.float32(99.0)})
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    full_std_ds.to_netcdf(tmp_path / "full_std.nc")
+    residual_std_ds.to_netcdf(tmp_path / "residual_std.nc")
+
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "full_std.nc",
+        scalar_stds_path=tmp_path / "residual_std.nc",
+        scalar_stds_names=["press"],
+    ).build(["prog", "press"])
+    assert float(normalizer.stds["prog"]) == 2.0
+    assert float(normalizer.stds["press"]) == 5.0
+
+    config = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "full_std.nc",
+        scalar_stds_path=tmp_path / "residual_std.nc",
+        scalar_stds_names=["press"],
+    )
+    config.load()
+    assert config.stds["prog"] == 2.0
+    assert config.stds["press"] == 5.0
+    assert config.scalar_stds_path is None
+    assert config.scalar_stds_names == []
+
+
+def test_spatial_means_with_scalar_residual_stds(tmp_path):
+    """PRESsfc-style: 2D time-mean centering with residual std, others scalar."""
+    lat, lon = 2, 3
+    spatial = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon)
+    mean_ds = xr.Dataset({"prog": np.float32(1.0), "press": np.float32(0.0)})
+    spatial_ds = xr.Dataset({"press": (("lat", "lon"), spatial)})
+    full_std_ds = xr.Dataset({"prog": np.float32(2.0), "press": np.float32(40.0)})
+    residual_std_ds = xr.Dataset({"press": np.float32(5.0)})
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    spatial_ds.to_netcdf(tmp_path / "spatial.nc")
+    full_std_ds.to_netcdf(tmp_path / "full_std.nc")
+    residual_std_ds.to_netcdf(tmp_path / "residual_std.nc")
+
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "full_std.nc",
+        spatial_means_path=tmp_path / "spatial.nc",
+        spatial_means_names=["press"],
+        scalar_stds_path=tmp_path / "residual_std.nc",
+        scalar_stds_names=["press"],
+    ).build(["prog", "press"])
+    assert normalizer.means["prog"].ndim == 0
+    assert float(normalizer.means["prog"]) == 1.0
+    assert tuple(normalizer.means["press"].shape) == (lat, lon)
+    assert float(normalizer.stds["prog"]) == 2.0
+    assert float(normalizer.stds["press"]) == 5.0
+
+    data = move_tensordict_to_device({"press": torch.zeros(lat, lon) + 10.0})
+    normalized = normalizer.normalize(data)
+    mean = torch.as_tensor(spatial, device=data["press"].device)
+    expected = (data["press"] - mean) / 5.0
+    torch.testing.assert_close(normalized["press"], expected)
+
+
+def test_spatial_stds_override_scalar_stds(tmp_path):
+    lat, lon = 2, 3
+    spatial_std = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon) + 1.0
+    mean_ds = xr.Dataset({"prog": np.float32(0.0), "press": np.float32(0.0)})
+    full_std_ds = xr.Dataset({"prog": np.float32(2.0), "press": np.float32(40.0)})
+    spatial_std_ds = xr.Dataset(
+        {"press": (("lat", "lon"), spatial_std), "prog": (("lat", "lon"), spatial_std)}
+    )
+    mean_ds.to_netcdf(tmp_path / "mean.nc")
+    full_std_ds.to_netcdf(tmp_path / "full_std.nc")
+    spatial_std_ds.to_netcdf(tmp_path / "spatial_std.nc")
+
+    normalizer = NormalizationConfig(
+        global_means_path=tmp_path / "mean.nc",
+        global_stds_path=tmp_path / "full_std.nc",
+        spatial_stds_path=tmp_path / "spatial_std.nc",
+        spatial_stds_names=["press"],
+    ).build(["prog", "press"])
+    assert float(normalizer.stds["prog"]) == 2.0
+    assert tuple(normalizer.stds["press"].shape) == (lat, lon)
+    torch.testing.assert_close(
+        normalizer.stds["press"].cpu(), torch.as_tensor(spatial_std)
+    )
+
+
+def test_scalar_stds_path_requires_names():
+    with pytest.raises(ValueError, match="scalar_stds_names"):
+        NormalizationConfig(
+            global_means_path="/means.nc",
+            global_stds_path="/stds.nc",
+            scalar_stds_path="/residual.nc",
+        )
+
+
+def test_spatial_stds_path_requires_names():
+    with pytest.raises(ValueError, match="spatial_stds_names"):
+        NormalizationConfig(
+            global_means_path="/means.nc",
+            global_stds_path="/stds.nc",
+            spatial_stds_path="/spatial_std.nc",
+        )
+
+
+def test_scalar_and_spatial_stds_names_must_not_overlap():
+    with pytest.raises(ValueError, match="must not overlap"):
+        NormalizationConfig(
+            global_means_path="/means.nc",
+            global_stds_path="/stds.nc",
+            scalar_stds_path="/residual.nc",
+            scalar_stds_names=["press"],
+            spatial_stds_path="/spatial_std.nc",
+            spatial_stds_names=["press"],
+        )
+
+
 def test_denormalize_fill_nans_with_spatial_means():
     means = move_tensordict_to_device({"a": torch.tensor([[1.0, 2.0], [3.0, 4.0]])})
     stds = move_tensordict_to_device({"a": torch.tensor(1.0)})
