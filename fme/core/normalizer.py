@@ -1,6 +1,6 @@
 import dataclasses
 import pathlib
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from copy import copy
 from typing import Protocol
 
@@ -12,13 +12,20 @@ import xarray as xr
 from fme.core.device import move_tensordict_to_device
 from fme.core.typing_ import TensorDict, TensorMapping
 
-# (path_attr, names_attr) pairs for optional per-variable mean/std file overrides.
-_STAT_OVERRIDE_PAIRS: tuple[tuple[str, str], ...] = (
-    ("scalar_means_path", "scalar_means_names"),
-    ("spatial_means_path", "spatial_means_names"),
-    ("scalar_stds_path", "scalar_stds_names"),
-    ("spatial_stds_path", "spatial_stds_names"),
-)
+
+@dataclasses.dataclass
+class StatFileOverride:
+    """Replace stats for named variables from another netCDF file.
+
+    Rank is taken from the file: scalars or spatial maps are both allowed.
+    """
+
+    path: str | pathlib.Path
+    names: list[str]
+
+    def __post_init__(self):
+        if not self.names:
+            raise ValueError("StatFileOverride requires a non-empty names list")
 
 
 @dataclasses.dataclass
@@ -34,31 +41,11 @@ class NormalizationConfig:
         global_stds_path: Path to a netCDF file containing global stds.
         means: Mapping from variable names to means.
         stds: Mapping from variable names to stds.
-        scalar_means_path: Optional netCDF of scalar means. When set with
-            ``scalar_means_names``, those variables use scalar means from this
-            file instead of ``global_means_path`` (e.g. keep orography / land
-            masks absolute while using a spatial time-mean for other fields).
-        scalar_means_names: Variable names that take means from
-            ``scalar_means_path``.
-        spatial_means_path: Optional netCDF of spatially varying means. When
-            set with ``spatial_means_names``, those variables use maps from
-            this file instead of ``global_means_path`` (e.g. 2D time-mean
-            centering for a few fields while others stay scalar).
-        spatial_means_names: Variable names that take means from
-            ``spatial_means_path``. Must not overlap ``scalar_means_names``.
-        scalar_stds_path: Optional netCDF of scalar stds. When set with
-            ``scalar_stds_names``, those variables use stds from this file
-            instead of ``global_stds_path`` (e.g. residual/anomaly std for a
-            2D-centered field while others keep full-field std).
-        scalar_stds_names: Variable names that take stds from
-            ``scalar_stds_path``.
-        spatial_stds_path: Optional netCDF of spatially varying stds. When
-            set with ``spatial_stds_names``, those variables use maps from
-            this file instead of ``global_stds_path``.
-        spatial_stds_names: Variable names that take stds from
-            ``spatial_stds_path``. Must not overlap ``scalar_stds_names``.
-            Mean and std overrides are independent: a name may use a spatial
-            mean and a scalar std together.
+        means_overrides: Optional per-variable mean files. After loading
+            ``global_means_path``, each entry replaces ``names`` from ``path``
+            (e.g. a 2D time-mean for PRESsfc while others stay scalar).
+        stds_overrides: Optional per-variable std files, independent of
+            ``means_overrides`` (e.g. residual std for a 2D-centered field).
         fill_nans_on_normalize: Whether to fill NaNs during normalization. If
             true, on normalization NaNs in the denormalized input become zeros in
             the normalized output.
@@ -75,14 +62,8 @@ class NormalizationConfig:
     stds: Mapping[str, float | list | np.ndarray] = dataclasses.field(
         default_factory=dict
     )
-    scalar_means_path: str | pathlib.Path | None = None
-    scalar_means_names: list[str] = dataclasses.field(default_factory=list)
-    spatial_means_path: str | pathlib.Path | None = None
-    spatial_means_names: list[str] = dataclasses.field(default_factory=list)
-    scalar_stds_path: str | pathlib.Path | None = None
-    scalar_stds_names: list[str] = dataclasses.field(default_factory=list)
-    spatial_stds_path: str | pathlib.Path | None = None
-    spatial_stds_names: list[str] = dataclasses.field(default_factory=list)
+    means_overrides: list[StatFileOverride] = dataclasses.field(default_factory=list)
+    stds_overrides: list[StatFileOverride] = dataclasses.field(default_factory=list)
     fill_nans_on_normalize: bool = False
     fill_nans_on_denormalize: bool = False
 
@@ -101,26 +82,13 @@ class NormalizationConfig:
                 "Must use either global_means_path and global_stds_path "
                 "or explicit means and stds."
             )
-        for path_attr, names_attr in _STAT_OVERRIDE_PAIRS:
-            _validate_stat_override_pair(
-                getattr(self, path_attr),
-                getattr(self, names_attr),
-                path_attr=path_attr,
-                names_attr=names_attr,
-                using_path=using_path,
+        if (self.means_overrides or self.stds_overrides) and not using_path:
+            raise ValueError(
+                "means_overrides and stds_overrides require global_means_path "
+                "and global_stds_path (cannot combine with explicit means/stds)"
             )
-        _forbid_name_overlap(
-            self.scalar_means_names,
-            self.spatial_means_names,
-            "scalar_means_names",
-            "spatial_means_names",
-        )
-        _forbid_name_overlap(
-            self.scalar_stds_names,
-            self.spatial_stds_names,
-            "scalar_stds_names",
-            "spatial_stds_names",
-        )
+        _forbid_duplicate_override_names(self.means_overrides, "means_overrides")
+        _forbid_duplicate_override_names(self.stds_overrides, "stds_overrides")
 
     def load(self):
         """
@@ -136,24 +104,19 @@ class NormalizationConfig:
                 names=None,
                 defaults={"x": 0.0, "y": 0.0, "z": 0.0},
             )
-            _apply_stat_override(means, self.scalar_means_path, self.scalar_means_names)
-            _apply_stat_override(
-                means, self.spatial_means_path, self.spatial_means_names
-            )
+            _apply_stat_overrides(means, self.means_overrides)
             stds = load_dict_from_netcdf(
                 self.global_stds_path,
                 names=None,
                 defaults={"x": 1.0, "y": 1.0, "z": 1.0},
             )
-            _apply_stat_override(stds, self.scalar_stds_path, self.scalar_stds_names)
-            _apply_stat_override(stds, self.spatial_stds_path, self.spatial_stds_names)
+            _apply_stat_overrides(stds, self.stds_overrides)
             self.means = means
             self.stds = stds
             self.global_means_path = None
             self.global_stds_path = None
-            for path_attr, names_attr in _STAT_OVERRIDE_PAIRS:
-                setattr(self, path_attr, None)
-                setattr(self, names_attr, [])
+            self.means_overrides = []
+            self.stds_overrides = []
 
     def build(self, names: list[str]):
         using_path = (
@@ -164,14 +127,8 @@ class NormalizationConfig:
                 global_means_path=self.global_means_path,
                 global_stds_path=self.global_stds_path,
                 names=names,
-                scalar_means_path=self.scalar_means_path,
-                scalar_means_names=self.scalar_means_names,
-                spatial_means_path=self.spatial_means_path,
-                spatial_means_names=self.spatial_means_names,
-                scalar_stds_path=self.scalar_stds_path,
-                scalar_stds_names=self.scalar_stds_names,
-                spatial_stds_path=self.spatial_stds_path,
-                spatial_stds_names=self.spatial_stds_names,
+                means_overrides=self.means_overrides,
+                stds_overrides=self.stds_overrides,
                 fill_nans_on_normalize=self.fill_nans_on_normalize,
                 fill_nans_on_denormalize=self.fill_nans_on_denormalize,
             )
@@ -325,92 +282,52 @@ def _denormalize(
     return denormalized
 
 
-def _validate_stat_override_pair(
-    path: str | pathlib.Path | None,
-    names: Iterable[str],
-    *,
-    path_attr: str,
-    names_attr: str,
-    using_path: bool,
+def _forbid_duplicate_override_names(
+    overrides: Sequence[StatFileOverride], attr: str
 ) -> None:
-    names_list = list(names)
-    if names_list and path is None:
-        raise ValueError(f"{names_attr} requires {path_attr}")
-    if path is not None and not names_list:
-        raise ValueError(f"{path_attr} requires a non-empty {names_attr}")
-    if path is not None and not using_path:
-        raise ValueError(
-            f"{path_attr} requires global_means_path and global_stds_path "
-            "(cannot combine with explicit means/stds)"
-        )
+    seen: set[str] = set()
+    for override in overrides:
+        overlap = seen.intersection(override.names)
+        if overlap:
+            raise ValueError(
+                f"duplicate names in {attr}: {sorted(overlap)}. "
+                "Each variable may appear in at most one override."
+            )
+        seen.update(override.names)
 
 
-def _forbid_name_overlap(
-    first: Iterable[str],
-    second: Iterable[str],
-    first_attr: str,
-    second_attr: str,
-) -> None:
-    overlap = set(first) & set(second)
-    if overlap:
-        raise ValueError(
-            f"{first_attr} and {second_attr} must not overlap. "
-            f"Overlap: {sorted(overlap)}"
-        )
-
-
-def _apply_stat_override(
+def _apply_stat_overrides(
     stats: dict[str, float | np.ndarray],
-    path: str | pathlib.Path | None,
-    override_names: Iterable[str] | None,
+    overrides: Sequence[StatFileOverride],
     requested_names: Iterable[str] | None = None,
 ) -> None:
-    """Overwrite mean or std entries from an optional per-variable netCDF."""
-    if path is None:
-        return
-    if not override_names:
-        raise ValueError(f"{path} override requires a non-empty names list")
-    names = list(override_names)
-    if requested_names is not None:
-        requested = set(requested_names)
-        names = [n for n in names if n in requested]
-    if names:
-        stats.update(load_dict_from_netcdf(path, names, defaults={}))
+    """Overwrite mean or std entries from optional per-variable netCDF files."""
+    requested = None if requested_names is None else set(requested_names)
+    for override in overrides:
+        names = list(override.names)
+        if requested is not None:
+            names = [n for n in names if n in requested]
+        if names:
+            stats.update(load_dict_from_netcdf(override.path, names, defaults={}))
 
 
 def get_normalizer(
     global_means_path,
     global_stds_path,
     names: list[str],
-    scalar_means_path: str | pathlib.Path | None = None,
-    scalar_means_names: list[str] | None = None,
-    spatial_means_path: str | pathlib.Path | None = None,
-    spatial_means_names: list[str] | None = None,
-    scalar_stds_path: str | pathlib.Path | None = None,
-    scalar_stds_names: list[str] | None = None,
-    spatial_stds_path: str | pathlib.Path | None = None,
-    spatial_stds_names: list[str] | None = None,
+    means_overrides: Sequence[StatFileOverride] | None = None,
+    stds_overrides: Sequence[StatFileOverride] | None = None,
     **normalizer_kwargs,
 ) -> StandardNormalizer:
     means = load_dict_from_netcdf(
         global_means_path, names, defaults={"x": 0.0, "y": 0.0, "z": 0.0}
     )
-    _apply_stat_override(
-        means, scalar_means_path, scalar_means_names, requested_names=names
-    )
-    _apply_stat_override(
-        means, spatial_means_path, spatial_means_names, requested_names=names
-    )
+    _apply_stat_overrides(means, means_overrides or [], requested_names=names)
     means = {k: torch.as_tensor(v, dtype=torch.float) for k, v in means.items()}
     stds = load_dict_from_netcdf(
         global_stds_path, names, defaults={"x": 1.0, "y": 1.0, "z": 1.0}
     )
-    _apply_stat_override(
-        stds, scalar_stds_path, scalar_stds_names, requested_names=names
-    )
-    _apply_stat_override(
-        stds, spatial_stds_path, spatial_stds_names, requested_names=names
-    )
+    _apply_stat_overrides(stds, stds_overrides or [], requested_names=names)
     stds = {k: torch.as_tensor(v, dtype=torch.float) for k, v in stds.items()}
     return StandardNormalizer(means=means, stds=stds, **normalizer_kwargs)
 

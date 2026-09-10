@@ -15,6 +15,7 @@ from fme.core.normalizer import (
     NormalizationConfig,
     NormalizeFn,
     StandardNormalizer,
+    StatFileOverride,
     _combine_normalizers,
 )
 
@@ -448,7 +449,7 @@ def test_load_keeps_spatial_means(tmp_path):
     assert normalizer.means["b"].ndim == 0
 
 
-def test_scalar_means_override_spatial_means(tmp_path):
+def test_means_overrides_scalar_over_spatial_default(tmp_path):
     """Constants keep scalar centering while other fields use spatial means."""
     lat, lon = 2, 3
     spatial = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon)
@@ -464,11 +465,11 @@ def test_scalar_means_override_spatial_means(tmp_path):
     scalar_ds.to_netcdf(tmp_path / "scalar.nc")
     std_ds.to_netcdf(tmp_path / "std.nc")
 
+    override = StatFileOverride(path=tmp_path / "scalar.nc", names=["const"])
     normalizer = NormalizationConfig(
         global_means_path=tmp_path / "mean.nc",
         global_stds_path=tmp_path / "std.nc",
-        scalar_means_path=tmp_path / "scalar.nc",
-        scalar_means_names=["const"],
+        means_overrides=[override],
     ).build(["prog", "const"])
     assert tuple(normalizer.means["prog"].shape) == (lat, lon)
     assert normalizer.means["const"].ndim == 0
@@ -477,26 +478,16 @@ def test_scalar_means_override_spatial_means(tmp_path):
     config = NormalizationConfig(
         global_means_path=tmp_path / "mean.nc",
         global_stds_path=tmp_path / "std.nc",
-        scalar_means_path=tmp_path / "scalar.nc",
-        scalar_means_names=["const"],
+        means_overrides=[override],
     )
     config.load()
     assert isinstance(config.means["prog"], np.ndarray)
     assert config.means["const"] == 7.0
-    assert config.scalar_means_path is None
-    assert config.scalar_means_names == []
+    assert config.means_overrides == []
+    assert config.global_means_path is None
 
 
-def test_scalar_means_path_requires_names():
-    with pytest.raises(ValueError, match="scalar_means_names"):
-        NormalizationConfig(
-            global_means_path="/means.nc",
-            global_stds_path="/stds.nc",
-            scalar_means_path="/scalar.nc",
-        )
-
-
-def test_spatial_means_override_scalar_means(tmp_path):
+def test_means_overrides_spatial_over_scalar_default(tmp_path):
     """Selected fields use 2D time-mean maps while others stay scalar."""
     lat, lon = 2, 3
     spatial = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon)
@@ -514,11 +505,11 @@ def test_spatial_means_override_scalar_means(tmp_path):
     spatial_ds.to_netcdf(tmp_path / "spatial.nc")
     std_ds.to_netcdf(tmp_path / "std.nc")
 
+    override = StatFileOverride(path=tmp_path / "spatial.nc", names=["press"])
     normalizer = NormalizationConfig(
         global_means_path=tmp_path / "mean.nc",
         global_stds_path=tmp_path / "std.nc",
-        spatial_means_path=tmp_path / "spatial.nc",
-        spatial_means_names=["press"],
+        means_overrides=[override],
     ).build(["prog", "press"])
     assert normalizer.means["prog"].ndim == 0
     assert float(normalizer.means["prog"]) == 1.0
@@ -530,39 +521,16 @@ def test_spatial_means_override_scalar_means(tmp_path):
     config = NormalizationConfig(
         global_means_path=tmp_path / "mean.nc",
         global_stds_path=tmp_path / "std.nc",
-        spatial_means_path=tmp_path / "spatial.nc",
-        spatial_means_names=["press"],
+        means_overrides=[override],
     )
     config.load()
     assert config.means["prog"] == 1.0
     assert isinstance(config.means["press"], np.ndarray)
     assert config.means["press"].shape == (lat, lon)
-    assert config.spatial_means_path is None
-    assert config.spatial_means_names == []
+    assert config.means_overrides == []
 
 
-def test_spatial_means_path_requires_names():
-    with pytest.raises(ValueError, match="spatial_means_names"):
-        NormalizationConfig(
-            global_means_path="/means.nc",
-            global_stds_path="/stds.nc",
-            spatial_means_path="/spatial.nc",
-        )
-
-
-def test_scalar_and_spatial_means_names_must_not_overlap():
-    with pytest.raises(ValueError, match="must not overlap"):
-        NormalizationConfig(
-            global_means_path="/means.nc",
-            global_stds_path="/stds.nc",
-            scalar_means_path="/scalar.nc",
-            scalar_means_names=["press"],
-            spatial_means_path="/spatial.nc",
-            spatial_means_names=["press"],
-        )
-
-
-def test_scalar_stds_override_full_field_stds(tmp_path):
+def test_stds_overrides_residual_over_full_field(tmp_path):
     """Selected fields take residual/anomaly stds; others keep full-field stds."""
     mean_ds = xr.Dataset({"prog": np.float32(1.0), "press": np.float32(0.0)})
     full_std_ds = xr.Dataset({"prog": np.float32(2.0), "press": np.float32(40.0)})
@@ -571,11 +539,11 @@ def test_scalar_stds_override_full_field_stds(tmp_path):
     full_std_ds.to_netcdf(tmp_path / "full_std.nc")
     residual_std_ds.to_netcdf(tmp_path / "residual_std.nc")
 
+    override = StatFileOverride(path=tmp_path / "residual_std.nc", names=["press"])
     normalizer = NormalizationConfig(
         global_means_path=tmp_path / "mean.nc",
         global_stds_path=tmp_path / "full_std.nc",
-        scalar_stds_path=tmp_path / "residual_std.nc",
-        scalar_stds_names=["press"],
+        stds_overrides=[override],
     ).build(["prog", "press"])
     assert float(normalizer.stds["prog"]) == 2.0
     assert float(normalizer.stds["press"]) == 5.0
@@ -583,17 +551,15 @@ def test_scalar_stds_override_full_field_stds(tmp_path):
     config = NormalizationConfig(
         global_means_path=tmp_path / "mean.nc",
         global_stds_path=tmp_path / "full_std.nc",
-        scalar_stds_path=tmp_path / "residual_std.nc",
-        scalar_stds_names=["press"],
+        stds_overrides=[override],
     )
     config.load()
     assert config.stds["prog"] == 2.0
     assert config.stds["press"] == 5.0
-    assert config.scalar_stds_path is None
-    assert config.scalar_stds_names == []
+    assert config.stds_overrides == []
 
 
-def test_spatial_means_with_scalar_residual_stds(tmp_path):
+def test_spatial_means_with_residual_stds(tmp_path):
     """PRESsfc-style: 2D time-mean centering with residual std, others scalar."""
     lat, lon = 2, 3
     spatial = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon)
@@ -609,10 +575,12 @@ def test_spatial_means_with_scalar_residual_stds(tmp_path):
     normalizer = NormalizationConfig(
         global_means_path=tmp_path / "mean.nc",
         global_stds_path=tmp_path / "full_std.nc",
-        spatial_means_path=tmp_path / "spatial.nc",
-        spatial_means_names=["press"],
-        scalar_stds_path=tmp_path / "residual_std.nc",
-        scalar_stds_names=["press"],
+        means_overrides=[
+            StatFileOverride(path=tmp_path / "spatial.nc", names=["press"])
+        ],
+        stds_overrides=[
+            StatFileOverride(path=tmp_path / "residual_std.nc", names=["press"])
+        ],
     ).build(["prog", "press"])
     assert normalizer.means["prog"].ndim == 0
     assert float(normalizer.means["prog"]) == 1.0
@@ -627,7 +595,7 @@ def test_spatial_means_with_scalar_residual_stds(tmp_path):
     torch.testing.assert_close(normalized["press"], expected)
 
 
-def test_spatial_stds_override_scalar_stds(tmp_path):
+def test_stds_overrides_spatial_over_scalar(tmp_path):
     lat, lon = 2, 3
     spatial_std = np.arange(lat * lon, dtype=np.float32).reshape(lat, lon) + 1.0
     mean_ds = xr.Dataset({"prog": np.float32(0.0), "press": np.float32(0.0)})
@@ -642,8 +610,9 @@ def test_spatial_stds_override_scalar_stds(tmp_path):
     normalizer = NormalizationConfig(
         global_means_path=tmp_path / "mean.nc",
         global_stds_path=tmp_path / "full_std.nc",
-        spatial_stds_path=tmp_path / "spatial_std.nc",
-        spatial_stds_names=["press"],
+        stds_overrides=[
+            StatFileOverride(path=tmp_path / "spatial_std.nc", names=["press"])
+        ],
     ).build(["prog", "press"])
     assert float(normalizer.stds["prog"]) == 2.0
     assert tuple(normalizer.stds["press"].shape) == (lat, lon)
@@ -652,34 +621,57 @@ def test_spatial_stds_override_scalar_stds(tmp_path):
     )
 
 
-def test_scalar_stds_path_requires_names():
-    with pytest.raises(ValueError, match="scalar_stds_names"):
+def test_stat_file_override_requires_names():
+    with pytest.raises(ValueError, match="non-empty names"):
+        StatFileOverride(path="/means.nc", names=[])
+
+
+def test_overrides_require_path_mode():
+    with pytest.raises(ValueError, match="require global_means_path"):
         NormalizationConfig(
-            global_means_path="/means.nc",
-            global_stds_path="/stds.nc",
-            scalar_stds_path="/residual.nc",
+            means={"a": 0.0},
+            stds={"a": 1.0},
+            means_overrides=[StatFileOverride(path="/other.nc", names=["a"])],
         )
 
 
-def test_spatial_stds_path_requires_names():
-    with pytest.raises(ValueError, match="spatial_stds_names"):
+def test_duplicate_names_in_means_overrides():
+    with pytest.raises(ValueError, match="duplicate names in means_overrides"):
         NormalizationConfig(
             global_means_path="/means.nc",
             global_stds_path="/stds.nc",
-            spatial_stds_path="/spatial_std.nc",
+            means_overrides=[
+                StatFileOverride(path="/a.nc", names=["press"]),
+                StatFileOverride(path="/b.nc", names=["press"]),
+            ],
         )
 
 
-def test_scalar_and_spatial_stds_names_must_not_overlap():
-    with pytest.raises(ValueError, match="must not overlap"):
+def test_duplicate_names_in_stds_overrides():
+    with pytest.raises(ValueError, match="duplicate names in stds_overrides"):
         NormalizationConfig(
             global_means_path="/means.nc",
             global_stds_path="/stds.nc",
-            scalar_stds_path="/residual.nc",
-            scalar_stds_names=["press"],
-            spatial_stds_path="/spatial_std.nc",
-            spatial_stds_names=["press"],
+            stds_overrides=[
+                StatFileOverride(path="/a.nc", names=["press"]),
+                StatFileOverride(path="/b.nc", names=["press", "prog"]),
+            ],
         )
+
+
+def test_overrides_from_dict_roundtrip():
+    config = NormalizationConfig(
+        global_means_path="/means.nc",
+        global_stds_path="/stds.nc",
+        means_overrides=[StatFileOverride(path="/time-mean.nc", names=["PRESsfc"])],
+        stds_overrides=[StatFileOverride(path="/residual.nc", names=["PRESsfc"])],
+    )
+    round_tripped = dacite.from_dict(
+        NormalizationConfig,
+        data=dataclasses.asdict(config),
+        config=dacite.Config(strict=True),
+    )
+    assert config == round_tripped
 
 
 def test_denormalize_fill_nans_with_spatial_means():
