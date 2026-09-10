@@ -12,6 +12,14 @@ import xarray as xr
 from fme.core.device import move_tensordict_to_device
 from fme.core.typing_ import TensorDict, TensorMapping
 
+# (path_attr, names_attr) pairs for optional per-variable mean/std file overrides.
+_STAT_OVERRIDE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("scalar_means_path", "scalar_means_names"),
+    ("spatial_means_path", "spatial_means_names"),
+    ("scalar_stds_path", "scalar_stds_names"),
+    ("spatial_stds_path", "spatial_stds_names"),
+)
+
 
 @dataclasses.dataclass
 class NormalizationConfig:
@@ -38,6 +46,19 @@ class NormalizationConfig:
             centering for a few fields while others stay scalar).
         spatial_means_names: Variable names that take means from
             ``spatial_means_path``. Must not overlap ``scalar_means_names``.
+        scalar_stds_path: Optional netCDF of scalar stds. When set with
+            ``scalar_stds_names``, those variables use stds from this file
+            instead of ``global_stds_path`` (e.g. residual/anomaly std for a
+            2D-centered field while others keep full-field std).
+        scalar_stds_names: Variable names that take stds from
+            ``scalar_stds_path``.
+        spatial_stds_path: Optional netCDF of spatially varying stds. When
+            set with ``spatial_stds_names``, those variables use maps from
+            this file instead of ``global_stds_path``.
+        spatial_stds_names: Variable names that take stds from
+            ``spatial_stds_path``. Must not overlap ``scalar_stds_names``.
+            Mean and std overrides are independent: a name may use a spatial
+            mean and a scalar std together.
         fill_nans_on_normalize: Whether to fill NaNs during normalization. If
             true, on normalization NaNs in the denormalized input become zeros in
             the normalized output.
@@ -58,6 +79,10 @@ class NormalizationConfig:
     scalar_means_names: list[str] = dataclasses.field(default_factory=list)
     spatial_means_path: str | pathlib.Path | None = None
     spatial_means_names: list[str] = dataclasses.field(default_factory=list)
+    scalar_stds_path: str | pathlib.Path | None = None
+    scalar_stds_names: list[str] = dataclasses.field(default_factory=list)
+    spatial_stds_path: str | pathlib.Path | None = None
+    spatial_stds_names: list[str] = dataclasses.field(default_factory=list)
     fill_nans_on_normalize: bool = False
     fill_nans_on_denormalize: bool = False
 
@@ -76,34 +101,26 @@ class NormalizationConfig:
                 "Must use either global_means_path and global_stds_path "
                 "or explicit means and stds."
             )
-        if self.scalar_means_names and self.scalar_means_path is None:
-            raise ValueError("scalar_means_names requires scalar_means_path")
-        if self.scalar_means_path is not None and not self.scalar_means_names:
-            raise ValueError(
-                "scalar_means_path requires a non-empty scalar_means_names"
+        for path_attr, names_attr in _STAT_OVERRIDE_PAIRS:
+            _validate_stat_override_pair(
+                getattr(self, path_attr),
+                getattr(self, names_attr),
+                path_attr=path_attr,
+                names_attr=names_attr,
+                using_path=using_path,
             )
-        if self.scalar_means_path is not None and not using_path:
-            raise ValueError(
-                "scalar_means_path requires global_means_path and global_stds_path "
-                "(cannot combine with explicit means/stds)"
-            )
-        if self.spatial_means_names and self.spatial_means_path is None:
-            raise ValueError("spatial_means_names requires spatial_means_path")
-        if self.spatial_means_path is not None and not self.spatial_means_names:
-            raise ValueError(
-                "spatial_means_path requires a non-empty spatial_means_names"
-            )
-        if self.spatial_means_path is not None and not using_path:
-            raise ValueError(
-                "spatial_means_path requires global_means_path and global_stds_path "
-                "(cannot combine with explicit means/stds)"
-            )
-        overlap = set(self.scalar_means_names) & set(self.spatial_means_names)
-        if overlap:
-            raise ValueError(
-                "scalar_means_names and spatial_means_names must not overlap. "
-                f"Overlap: {sorted(overlap)}"
-            )
+        _forbid_name_overlap(
+            self.scalar_means_names,
+            self.spatial_means_names,
+            "scalar_means_names",
+            "spatial_means_names",
+        )
+        _forbid_name_overlap(
+            self.scalar_stds_names,
+            self.spatial_stds_names,
+            "scalar_stds_names",
+            "spatial_stds_names",
+        )
 
     def load(self):
         """
@@ -119,10 +136,8 @@ class NormalizationConfig:
                 names=None,
                 defaults={"x": 0.0, "y": 0.0, "z": 0.0},
             )
-            _apply_means_override(
-                means, self.scalar_means_path, self.scalar_means_names
-            )
-            _apply_means_override(
+            _apply_stat_override(means, self.scalar_means_path, self.scalar_means_names)
+            _apply_stat_override(
                 means, self.spatial_means_path, self.spatial_means_names
             )
             stds = load_dict_from_netcdf(
@@ -130,14 +145,15 @@ class NormalizationConfig:
                 names=None,
                 defaults={"x": 1.0, "y": 1.0, "z": 1.0},
             )
+            _apply_stat_override(stds, self.scalar_stds_path, self.scalar_stds_names)
+            _apply_stat_override(stds, self.spatial_stds_path, self.spatial_stds_names)
             self.means = means
             self.stds = stds
             self.global_means_path = None
             self.global_stds_path = None
-            self.scalar_means_path = None
-            self.scalar_means_names = []
-            self.spatial_means_path = None
-            self.spatial_means_names = []
+            for path_attr, names_attr in _STAT_OVERRIDE_PAIRS:
+                setattr(self, path_attr, None)
+                setattr(self, names_attr, [])
 
     def build(self, names: list[str]):
         using_path = (
@@ -152,6 +168,10 @@ class NormalizationConfig:
                 scalar_means_names=self.scalar_means_names,
                 spatial_means_path=self.spatial_means_path,
                 spatial_means_names=self.spatial_means_names,
+                scalar_stds_path=self.scalar_stds_path,
+                scalar_stds_names=self.scalar_stds_names,
+                spatial_stds_path=self.spatial_stds_path,
+                spatial_stds_names=self.spatial_stds_names,
                 fill_nans_on_normalize=self.fill_nans_on_normalize,
                 fill_nans_on_denormalize=self.fill_nans_on_denormalize,
             )
@@ -305,13 +325,47 @@ def _denormalize(
     return denormalized
 
 
-def _apply_means_override(
-    means: dict[str, float | np.ndarray],
+def _validate_stat_override_pair(
+    path: str | pathlib.Path | None,
+    names: Iterable[str],
+    *,
+    path_attr: str,
+    names_attr: str,
+    using_path: bool,
+) -> None:
+    names_list = list(names)
+    if names_list and path is None:
+        raise ValueError(f"{names_attr} requires {path_attr}")
+    if path is not None and not names_list:
+        raise ValueError(f"{path_attr} requires a non-empty {names_attr}")
+    if path is not None and not using_path:
+        raise ValueError(
+            f"{path_attr} requires global_means_path and global_stds_path "
+            "(cannot combine with explicit means/stds)"
+        )
+
+
+def _forbid_name_overlap(
+    first: Iterable[str],
+    second: Iterable[str],
+    first_attr: str,
+    second_attr: str,
+) -> None:
+    overlap = set(first) & set(second)
+    if overlap:
+        raise ValueError(
+            f"{first_attr} and {second_attr} must not overlap. "
+            f"Overlap: {sorted(overlap)}"
+        )
+
+
+def _apply_stat_override(
+    stats: dict[str, float | np.ndarray],
     path: str | pathlib.Path | None,
     override_names: Iterable[str] | None,
     requested_names: Iterable[str] | None = None,
 ) -> None:
-    """Overwrite ``means`` entries from an optional netCDF of per-variable means."""
+    """Overwrite mean or std entries from an optional per-variable netCDF."""
     if path is None:
         return
     if not override_names:
@@ -321,7 +375,7 @@ def _apply_means_override(
         requested = set(requested_names)
         names = [n for n in names if n in requested]
     if names:
-        means.update(load_dict_from_netcdf(path, names, defaults={}))
+        stats.update(load_dict_from_netcdf(path, names, defaults={}))
 
 
 def get_normalizer(
@@ -332,20 +386,30 @@ def get_normalizer(
     scalar_means_names: list[str] | None = None,
     spatial_means_path: str | pathlib.Path | None = None,
     spatial_means_names: list[str] | None = None,
+    scalar_stds_path: str | pathlib.Path | None = None,
+    scalar_stds_names: list[str] | None = None,
+    spatial_stds_path: str | pathlib.Path | None = None,
+    spatial_stds_names: list[str] | None = None,
     **normalizer_kwargs,
 ) -> StandardNormalizer:
     means = load_dict_from_netcdf(
         global_means_path, names, defaults={"x": 0.0, "y": 0.0, "z": 0.0}
     )
-    _apply_means_override(
+    _apply_stat_override(
         means, scalar_means_path, scalar_means_names, requested_names=names
     )
-    _apply_means_override(
+    _apply_stat_override(
         means, spatial_means_path, spatial_means_names, requested_names=names
     )
     means = {k: torch.as_tensor(v, dtype=torch.float) for k, v in means.items()}
     stds = load_dict_from_netcdf(
         global_stds_path, names, defaults={"x": 1.0, "y": 1.0, "z": 1.0}
+    )
+    _apply_stat_override(
+        stds, scalar_stds_path, scalar_stds_names, requested_names=names
+    )
+    _apply_stat_override(
+        stds, spatial_stds_path, spatial_stds_names, requested_names=names
     )
     stds = {k: torch.as_tensor(v, dtype=torch.float) for k, v in stds.items()}
     return StandardNormalizer(means=means, stds=stds, **normalizer_kwargs)
