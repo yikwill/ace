@@ -1,10 +1,9 @@
 import dataclasses
 import datetime
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from typing import Any
 
-import dacite
 import torch
 from torch import nn
 
@@ -36,6 +35,7 @@ from fme.core.step.secondary_decoder import (
     SecondaryDecoder,
     SecondaryDecoderConfig,
 )
+from fme.core.step.spectral_lowpass import ResidualLowpass, ResidualLowpassConfig
 from fme.core.step.step import StepABC, StepConfigABC, StepSelector
 from fme.core.stepper_state import StepperState
 from fme.core.typing_ import TensorDict, TensorMapping
@@ -43,6 +43,46 @@ from fme.core.var_masking import VariableMasking, VariableMaskingConfig
 
 DEFAULT_TIMESTEP = datetime.timedelta(hours=6)
 DEFAULT_ENCODED_TIMESTEP = encode_timestep(DEFAULT_TIMESTEP)
+
+
+@dataclasses.dataclass
+class ResidualPredictionConfig:
+    """
+    Configuration for predicting prognostics as tendencies rather than states.
+
+    Parameters:
+        names: Prognostic names to step as residuals, the rest predicted
+            full-field. Each must be in both ``in_names`` and ``out_names``.
+            Default (None) steps every prognostic as a residual. Naming a
+            subset also narrows tendency-std loss scaling to that subset: the
+            remaining prognostics are scored in full-field-std units, where
+            before they would have used the ``normalization.residual`` stats.
+        normalized: Treat the network's residual outputs as tendencies in
+            ``normalization.residual`` units rather than full-field-normalized
+            units, so a unit output is one standard deviation of the per-step
+            tendency. Requires a ``normalization.residual`` block, which
+            cannot be combined with ``normalization.loss``, so enabling this
+            also commits the loss to the tendency convention.
+    """
+
+    names: list[str] | None = None
+    normalized: bool = False
+
+    def __post_init__(self):
+        if self.names is not None and len(self.names) == 0:
+            raise ValueError(
+                "residual_prediction.names must not be empty; use names: null "
+                "to step every prognostic as a residual, or residual_prediction:"
+                " null to disable residual prediction"
+            )
+
+    def validate_names(self, prognostic_names: Collection[str]) -> None:
+        for name in self.names or []:
+            if name not in prognostic_names:
+                raise ValueError(
+                    f"residual_prediction name '{name}' is not prognostic; "
+                    f"prognostic names are {sorted(prognostic_names)}"
+                )
 
 
 @StepSelector.register("single_module")
@@ -64,19 +104,18 @@ class SingleModuleStepConfig(StepConfigABC):
         next_step_forcing_names: Names of forcing variables for the next timestep.
         prescribed_prognostic_names: Prognostic variable names to overwrite from
             forcing data at each step (e.g. for inference with observed values).
-        residual_prediction: Whether to use residual prediction.
-        scale_residual_by_residual_std: If True, multiply prognostic network
-            outputs by σ_res/σ_full before the residual add so the network
-            predicts in residual units (x_next = x + r_net * σ_res). Requires
-            residual_prediction and normalization.residual. Default False
-            keeps x_next = x + r_net * σ_full.
-        full_field_prognostic_names: Prognostic (in ∩ out) names that stay
-            full-field when residual_prediction is True. Remaining prognostics
-            still get the residual add (and residual-std add scaling). Loss
-            still uses residual stats for all prognostics, including these
-            names — prediction mode is independent of MSE weighting.
-            Empty default keeps all prognostics residual.
-            Requires residual_prediction if non-empty.
+        residual_prediction: When set, predict prognostics as tendencies
+            added to the input rather than as states. See
+            ``ResidualPredictionConfig`` for the per-variable and normalization
+            options. The deprecated bool form is still accepted, from
+            serialized configs and direct construction alike, meaning every
+            prognostic (True) or none (False).
+        residual_lowpass: Optional spherical-harmonic truncations applied
+            inside the residual add. ``target: residual`` steps ``x + LP(dx)``;
+            ``target: skip`` steps ``LP(x) + dx`` using a filtered copy of the
+            normalized input. The network always sees the unfiltered state.
+            Names must be stepped as residuals. ``lmax`` keeps degrees
+            ``l < lmax``. Empty default leaves the add unchanged.
         include_channel_mask_inputs: Whether to append per-variable mask indicator
             channels to the network input. When True, the network receives
             ``len(in_names)`` additional float channels (1.0 = present, 0.0 =
@@ -87,9 +126,13 @@ class SingleModuleStepConfig(StepConfigABC):
             denormalization. Supports shared (single reference field) or
             per-channel removal, with optional extra input channels.
         input_dropout: Optional training-time input channel dropout. When set,
-            a random subset of input channels is zeroed during training, with
-            the same mask broadcast across the whole batch. Disabled during
-            inference (eval mode).
+            a random subset of input channels is zeroed on each optimized
+            training step, with the same mask broadcast across the whole
+            batch. Applied only when gradients are enabled, so non-optimized
+            rollout steps (e.g. all but the last under
+            ``optimize_last_step_only``, or the trailing steps under
+            ``evaluate_all_steps``) run unmasked, as does inference
+            (eval mode).
     """
 
     builder: ModuleSelector
@@ -103,39 +146,61 @@ class SingleModuleStepConfig(StepConfigABC):
     )
     next_step_forcing_names: list[str] = dataclasses.field(default_factory=list)
     prescribed_prognostic_names: list[str] = dataclasses.field(default_factory=list)
-    residual_prediction: bool = False
-    scale_residual_by_residual_std: bool = False
-    full_field_prognostic_names: list[str] = dataclasses.field(default_factory=list)
+    residual_prediction: ResidualPredictionConfig | None = None
+    residual_lowpass: list[ResidualLowpassConfig] = dataclasses.field(
+        default_factory=list
+    )
     include_channel_mask_inputs: bool = False
     global_mean_removal: GlobalMeanRemovalConfigUnion | None = None
     input_dropout: VariableMaskingConfig | None = None
 
     def __post_init__(self):
         self.crps_training = None  # unused, kept for backwards compatibility
-        if self.scale_residual_by_residual_std:
-            if not self.residual_prediction:
-                raise ValueError(
-                    "scale_residual_by_residual_std requires residual_prediction=True"
-                )
-            if self.normalization.residual is None:
-                raise ValueError(
-                    "scale_residual_by_residual_std requires normalization.residual"
-                )
-        if self.full_field_prognostic_names:
-            if not self.residual_prediction:
-                raise ValueError(
-                    "full_field_prognostic_names requires residual_prediction=True"
-                )
-            unknown = [
-                n
-                for n in self.full_field_prognostic_names
-                if n not in self.prognostic_names
-            ]
-            if unknown:
-                raise ValueError(
-                    "full_field_prognostic_names must be prognostic "
-                    f"(in ∩ out). Not prognostic: {unknown}"
-                )
+        if isinstance(self.residual_prediction, bool):
+            # residual_prediction was a bool before it grew options. Serialized
+            # state migrates in remove_deprecated_keys; this isinstance keeps
+            # direct construction with the old bool working too, since the
+            # config is public API (exported from fme.ace).
+            self.residual_prediction = (
+                ResidualPredictionConfig() if self.residual_prediction else None
+            )
+        if self.residual_prediction is not None:
+            self.residual_prediction.validate_names(self.prognostic_names)
+            if self.residual_prediction.normalized:
+                # Report the loss conflict directly. Otherwise the user is told
+                # to add a residual block, then told it conflicts with the loss
+                # block, with neither message naming the option behind it.
+                if self.normalization.loss is not None:
+                    raise ValueError(
+                        "residual_prediction.normalized requires a "
+                        "normalization.residual block, which cannot be combined "
+                        "with normalization.loss; remove normalization.loss to "
+                        "use it. The loss then follows the prediction "
+                        "convention, scoring residual names in tendency-std "
+                        "units."
+                    )
+                if self.normalization.residual is None:
+                    raise ValueError(
+                        "residual_prediction.normalized requires a "
+                        "normalization.residual block"
+                    )
+        if self.residual_lowpass:
+            if self.residual_prediction is None:
+                raise ValueError("residual_lowpass requires residual_prediction")
+            seen: set[str] = set()
+            for entry in self.residual_lowpass:
+                for name in entry.names:
+                    if name in seen:
+                        raise ValueError(
+                            f"residual_lowpass name '{name}' is listed more than once"
+                        )
+                    seen.add(name)
+                    if name not in self.residual_names:
+                        raise ValueError(
+                            f"residual_lowpass name '{name}' is not stepped as a "
+                            "residual; residual names are "
+                            f"{sorted(self.residual_names)}"
+                        )
         if self.global_mean_removal is not None:
             self.global_mean_removal.validate_names(self.in_names, self.out_names)
         for name in self.prescribed_prognostic_names:
@@ -180,71 +245,127 @@ class SingleModuleStepConfig(StepConfigABC):
             extra_names = []
         if extra_residual_scaled_names is None:
             extra_residual_scaled_names = []
+        # Residual names are scored in tendency-std units, the rest in
+        # full-field-std units, matching how each is predicted.
         return self.normalization.get_loss_normalizer(
-            names=self._normalize_names + extra_names,
-            residual_scaled_names=(self.prognostic_names + extra_residual_scaled_names),
+            names=sorted(self._normalize_names) + extra_names,
+            residual_scaled_names=sorted(self.residual_names)
+            + extra_residual_scaled_names,
         )
 
     @classmethod
-    def from_state(cls, state) -> "SingleModuleStepConfig":
-        state = cls._remove_deprecated_keys(state)
-        return dacite.from_dict(
-            data_class=cls, data=state, config=dacite.Config(strict=True)
-        )
+    def remove_deprecated_keys(cls, state: Mapping[str, Any]) -> dict[str, Any]:
+        state_copy = dict(state)
+        if "crps_training" in state_copy:
+            del state_copy["crps_training"]
+        if isinstance(state_copy.get("residual_prediction"), bool):
+            # residual_prediction was a bool before it grew per-variable and
+            # normalization options. True meant every prognostic, full-field
+            # normalized. Both checkpoints and user yaml reach this hook.
+            state_copy["residual_prediction"] = (
+                {} if state_copy["residual_prediction"] else None
+            )
+        # Older experiment configs set this instead of
+        # residual_prediction.normalized. Pop it so strict loading still works.
+        if state_copy.pop("scale_residual_by_residual_std", False):
+            prediction = state_copy.get("residual_prediction")
+            if not isinstance(prediction, dict):
+                raise ValueError(
+                    "scale_residual_by_residual_std requires residual_prediction"
+                )
+            prediction = dict(prediction)
+            prediction["normalized"] = True
+            state_copy["residual_prediction"] = prediction
+        # Older experiment configs named the prognostics that stay full-field.
+        # Upstream expresses that as residual_prediction.names, the complement.
+        full_field = state_copy.pop("full_field_prognostic_names", None)
+        if full_field:
+            prediction = state_copy.get("residual_prediction")
+            if not isinstance(prediction, dict):
+                raise ValueError(
+                    "full_field_prognostic_names requires residual_prediction"
+                )
+            excluded = set(full_field)
+            in_names = set(state_copy["in_names"])
+            prognostics = [name for name in state_copy["out_names"] if name in in_names]
+            unknown = sorted(excluded.difference(prognostics))
+            if unknown:
+                raise ValueError(
+                    "full_field_prognostic_names must be prognostic "
+                    f"(in and out). Not prognostic: {unknown}"
+                )
+            prediction = dict(prediction)
+            base = prediction.get("names")
+            if base is None:
+                residual = [name for name in prognostics if name not in excluded]
+            else:
+                residual = [name for name in base if name not in excluded]
+            if not residual:
+                raise ValueError(
+                    "full_field_prognostic_names leaves no residual prognostics"
+                )
+            prediction["names"] = residual
+            state_copy["residual_prediction"] = prediction
+        return state_copy
 
     @property
-    def _normalize_names(self):
+    def residual_names(self) -> frozenset[str]:
+        """Names carrying the residual convention; the rest are full-field.
+
+        Every prognostic unless a subset is named. Note this is independent of
+        whether residual prediction is enabled: a config may set a
+        normalization.residual block purely to scale the loss, which has
+        always applied to all prognostics.
+        """
+        if self.residual_prediction is None or self.residual_prediction.names is None:
+            return self.prognostic_names
+        return frozenset(self.residual_prediction.names)
+
+    @property
+    def _normalize_names(self) -> frozenset[str]:
         """Names of variables which require normalization. I.e. inputs/outputs."""
-        return list(set(self.in_names).union(self.output_names))
+        return frozenset(set(self.in_names).union(self.output_names))
 
     @property
-    def input_names(self) -> list[str]:
+    def input_names(self) -> frozenset[str]:
         """
         Names of variables required as inputs to `step`,
         either in `input` or `next_step_input_data`.
         """
         if self.ocean is None:
-            return self.in_names
+            return frozenset(self.in_names)
         else:
-            return list(set(self.in_names).union(self.ocean.forcing_names))
+            return frozenset(set(self.in_names).union(self.ocean.forcing_names))
 
     def get_next_step_forcing_names(self) -> list[str]:
         """Names of input-only variables which come from the output timestep."""
         return self.next_step_forcing_names
 
     @property
-    def diagnostic_names(self) -> list[str]:
+    def diagnostic_names(self) -> frozenset[str]:
         """Names of variables which are outputs only."""
-        return list(set(self.output_names).difference(self.in_names))
+        return frozenset(set(self.output_names).difference(self.in_names))
 
     @property
-    def residual_prognostic_names(self) -> list[str]:
-        """Prognostics that receive the residual add (excludes full-field ones)."""
-        exclude = set(self.full_field_prognostic_names)
-        return [n for n in self.prognostic_names if n not in exclude]
-
-    @property
-    def output_names(self) -> list[str]:
+    def output_names(self) -> frozenset[str]:
         secondary_names = (
             self.secondary_decoder.secondary_diagnostic_names
             if self.secondary_decoder is not None
             else []
         )
-        return list(set(self.out_names).union(secondary_names))
+        return frozenset(set(self.out_names).union(secondary_names))
 
     @property
-    def next_step_input_names(self) -> list[str]:
+    def next_step_input_names(self) -> frozenset[str]:
         """Names of variables provided in next_step_input_data."""
-        input_only_names = set(self.input_names).difference(self.output_names)
-        result = set(input_only_names)
+        result = set(self.input_names).difference(self.output_names)
         if self.ocean is not None:
             result = result.union(self.ocean.forcing_names)
-        result = result.union(self.prescribed_prognostic_names)
-        return list(result)
+        return frozenset(result.union(self.prescribed_prognostic_names))
 
     @property
     def loss_names(self) -> list[str]:
-        return self.output_names
+        return sorted(self.output_names)
 
     @property
     def allow_missing_variables(self) -> bool:
@@ -275,13 +396,6 @@ class SingleModuleStepConfig(StepConfigABC):
     def get_prescribed_prognostic_names(self) -> list[str]:
         return list(self.prescribed_prognostic_names)
 
-    @classmethod
-    def _remove_deprecated_keys(cls, state: dict[str, Any]) -> dict[str, Any]:
-        state_copy = state.copy()
-        if "crps_training" in state_copy:
-            del state_copy["crps_training"]
-        return state_copy
-
     def get_step(
         self,
         dataset_info: DatasetInfo,
@@ -289,7 +403,9 @@ class SingleModuleStepConfig(StepConfigABC):
     ) -> "SingleModuleStep":
         logging.info("Initializing stepper from provided config")
         corrector = self.corrector.get_corrector(dataset_info)
-        normalizer = self.normalization.get_network_normalizer(self._normalize_names)
+        normalizer = self.normalization.get_network_normalizer(
+            sorted(self._normalize_names)
+        )
         return SingleModuleStep(
             config=self,
             dataset_info=dataset_info,
@@ -356,6 +472,36 @@ class SingleModuleStep(StepABC):
         self.in_packer = Packer(packed_in_names)
         self.out_packer = Packer(config.out_names)
         self._normalizer = normalizer
+        if config.residual_prediction is None:
+            self._residual_names: frozenset[str] | None = None
+        else:
+            self._residual_names = config.residual_names
+        if (
+            config.residual_prediction is not None
+            and config.residual_prediction.normalized
+        ):
+            assert config.normalization.residual is not None
+            residual_normalizer = config.normalization.residual.build(
+                names=sorted(config.residual_names)
+            )
+            # Scale residual outputs by residual_std / field_std in normalized
+            # space, so a unit network output is one tendency std. Scale only:
+            # the stats convention pairs full-field centering with tendency
+            # stds, so a mean tendency is learned through the network output.
+            self._residual_transform: TensorDict | None = {
+                name: residual_normalizer.stds[name] / normalizer.stds[name]
+                for name in config.residual_names
+            }
+        else:
+            self._residual_transform = None
+        if config.residual_lowpass:
+            self._residual_lowpass: ResidualLowpass | None = (
+                ResidualLowpass.from_config(
+                    config.residual_lowpass, dataset_info
+                ).to(get_device())
+            )
+        else:
+            self._residual_lowpass = None
         if config.ocean is not None:
             self.ocean: Ocean | None = config.ocean.build(
                 config.in_names, config.out_names, dataset_info.timestep
@@ -396,7 +542,6 @@ class SingleModuleStep(StepABC):
         self._corrector = corrector
         self.in_names = config.in_names
         self.out_names = config.out_names
-        self._residual_add_scales = _residual_add_scales(config, normalizer)
 
     @property
     def config(self) -> SingleModuleStepConfig:
@@ -496,10 +641,10 @@ class SingleModuleStep(StepABC):
             normalizer=self.normalizer,
             corrector=self._corrector,
             ocean=self.ocean,
-            residual_prediction=self._config.residual_prediction,
-            prognostic_names=self._config.residual_prognostic_names,
+            residual_names=self._residual_names,
+            residual_transform=self._residual_transform,
+            residual_lowpass=self._residual_lowpass,
             prescribed_prognostic_names=self._config.prescribed_prognostic_names,
-            residual_add_scales=self._residual_add_scales,
             global_mean_removal=self._global_mean_removal,
             data_mask=args.data_mask,
             stepper_state=args.stepper_state,
@@ -511,11 +656,17 @@ class SingleModuleStep(StepABC):
         Each ``step`` samples independently; the mask has no lifetime beyond
         the call. Returns ``None`` (no dropout) when input dropout is
         unconfigured or the module is in eval mode, so inference and
-        validation batches stay inert.
+        validation batches stay inert. Also returns ``None`` when gradients
+        are disabled: the training loops run non-optimized rollout steps
+        under ``torch.no_grad()``, and those steps only exist to produce the
+        trajectory fed to the optimized step, so masking them would perturb
+        that trajectory in a way inference never sees.
         """
         if self._input_masking is None:
             return None
         if not self.module.torch_module.training:
+            return None
+        if not torch.is_grad_enabled():
             return None
         names = self.in_packer.names
         mask = self._input_masking.sample_mask(get_device())
@@ -649,35 +800,6 @@ def _build_channel_mask_dict(
     return result
 
 
-def _residual_add_scales(
-    config: SingleModuleStepConfig,
-    network_normalizer: StandardNormalizer,
-) -> TensorDict | None:
-    """Per-prognostic σ_res/σ_full for residual-unit prediction, or None."""
-    if not config.scale_residual_by_residual_std:
-        return None
-    loss_normalizer = config.get_loss_normalizer()
-    scales: TensorDict = {}
-    for name in config.residual_prognostic_names:
-        if name not in network_normalizer.stds:
-            raise ValueError(
-                "scale_residual_by_residual_std: prognostic "
-                f"'{name}' missing from network normalizer stds"
-            )
-        if name not in loss_normalizer.stds:
-            raise ValueError(
-                "scale_residual_by_residual_std: prognostic "
-                f"'{name}' missing from residual/loss normalizer stds"
-            )
-        sigma_full = network_normalizer.stds[name]
-        if float(sigma_full) == 0.0:
-            raise ValueError(
-                f"scale_residual_by_residual_std: network std for '{name}' is 0"
-            )
-        scales[name] = loss_normalizer.stds[name] / sigma_full
-    return scales
-
-
 def step_with_adjustments(
     input: TensorMapping,
     next_step_input_data: TensorMapping,
@@ -685,10 +807,10 @@ def step_with_adjustments(
     normalizer: StandardNormalizer,
     corrector: CorrectorABC | None,
     ocean: Ocean | None,
-    residual_prediction: bool,
-    prognostic_names: list[str],
+    residual_names: Collection[str] | None = None,
+    residual_transform: TensorMapping | None = None,
+    residual_lowpass: ResidualLowpass | None = None,
     prescribed_prognostic_names: list[str] | None = None,
-    residual_add_scales: TensorMapping | None = None,
     global_mean_removal: GlobalMeanRemoval | None = None,
     data_mask: TensorMapping | None = None,
     stepper_state: StepperState | None = None,
@@ -709,13 +831,19 @@ def step_with_adjustments(
         normalizer: The normalizer to use.
         corrector: The corrector to use at the end of each step.
         ocean: The ocean model to use.
-        residual_prediction: Whether to use residual prediction.
-        prognostic_names: Names of prognostic variables.
+        residual_names: Names stepped as residuals (network output added to the
+            input in normalized space); the rest are full-field. None disables
+            residual prediction.
+        residual_transform: Optional per-name scale applied to residual outputs
+            in normalized space, so a unit network output is one tendency
+            standard deviation. Scale only; means are never applied. Must cover
+            every name in ``residual_names``.
+        residual_lowpass: Optional truncations applied after ``residual_transform``
+            and before the residual add. ``None`` leaves the add unchanged.
+            Skip-target names are filtered on a copy of the normalized input;
+            the tensor passed to ``network_calls`` is not filtered.
         prescribed_prognostic_names: Prognostic names to overwrite from
             next_step_input_data after the ocean step (e.g. for inference).
-        residual_add_scales: Optional per-prognostic σ_res/σ_full multipliers
-            applied to network outputs before the residual add. None keeps
-            the unscaled add (x_next = x + r_net * σ_full).
         global_mean_removal: Optional transform that removes per-sample
             global means before normalization and restores them after
             denormalization. When provided, ``forward_transform`` is called
@@ -750,17 +878,23 @@ def step_with_adjustments(
     else:
         input_norm = normalizer.normalize(input)
     output_norm = network_calls(input_norm)
-    if residual_prediction:
-        if residual_add_scales:
-            output_norm = {
-                name: (
-                    value * residual_add_scales[name]
-                    if name in residual_add_scales
-                    else value
-                )
-                for name, value in output_norm.items()
-            }
-        output_norm = add_names(input_norm, output_norm, prognostic_names)
+    if residual_names is not None:
+        if residual_transform is not None:
+            output_norm = dict(output_norm)
+            for name in residual_names:
+                # Indexing is deliberately strict on both dicts: a residual
+                # name the network did not produce, or a missing scale, is an
+                # invariant violation better surfaced than silently stepped
+                # full-field under the tendency convention.
+                output_norm[name] = output_norm[name] * residual_transform[name]
+        if residual_lowpass is not None:
+            # Scale first, then truncate, so LP sees the increment that is added.
+            # filter_skip copies; input_norm itself stays what the network saw.
+            output_norm = residual_lowpass.filter_residual(output_norm)
+            skip_input = residual_lowpass.filter_skip(input_norm)
+        else:
+            skip_input = input_norm
+        output_norm = add_names(skip_input, output_norm, residual_names)
     output = normalizer.denormalize(output_norm)
     if global_mean_removal is not None:
         assert gmr_state is not None
@@ -772,10 +906,9 @@ def step_with_adjustments(
         )
         result = corrector(input, output, next_step_input_data, corrector_state)
         output = result.corrected
-        # Detach the corrector diagnostic tensors.
-        diagnostics = CorrectorDiagnostics(
-            delta={k: v.detach() for k, v in result.diagnostics.delta.items()}
-        )
+        # The deltas stay on the autograd graph so a training loss can
+        # differentiate through the correction.
+        diagnostics = result.diagnostics
         if result.corrector_state is not None:
             # Preserve the incoming state's other fields (e.g. random_state)
             # rather than rebuilding from scratch, so StepperState stays
