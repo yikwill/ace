@@ -1,5 +1,6 @@
 import dataclasses
-from typing import Literal
+from collections.abc import Mapping
+from typing import Any, Literal
 
 from torch import nn
 from torch_harmonics import InverseRealSHT
@@ -145,6 +146,10 @@ class SphericalUNetBuilder(ModuleConfig):
     # downsample_first: historical encoder (default). classic: stem + process-then-down.
     unet_layout: Literal["downsample_first", "classic"] = "downsample_first"
 
+    @classmethod
+    def remove_deprecated_keys(cls, state: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(state)
+
     def build(
         self,
         n_in_channels: int,
@@ -221,6 +226,10 @@ class NoiseConditionedSphericalUNetBuilder(ModuleConfig):
     # entries use the kernel_shape/nlat heuristic at that level.
     theta_cutoff: list[float | None] | None = None
     unet_layout: Literal["downsample_first", "classic"] = "downsample_first"
+
+    @classmethod
+    def remove_deprecated_keys(cls, state: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(state)
 
     def build(
         self,
