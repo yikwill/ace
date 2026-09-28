@@ -35,6 +35,7 @@ from fme.core.step.secondary_decoder import (
     SecondaryDecoder,
     SecondaryDecoderConfig,
 )
+from fme.core.step.spectral_lowpass import ResidualLowpass, ResidualLowpassConfig
 from fme.core.step.step import StepABC, StepConfigABC, StepSelector
 from fme.core.stepper_state import StepperState
 from fme.core.typing_ import TensorDict, TensorMapping
@@ -109,6 +110,12 @@ class SingleModuleStepConfig(StepConfigABC):
             options. The deprecated bool form is still accepted, from
             serialized configs and direct construction alike, meaning every
             prognostic (True) or none (False).
+        residual_lowpass: Optional spherical-harmonic truncations applied
+            inside the residual add. ``target: residual`` steps ``x + LP(dx)``;
+            ``target: skip`` steps ``LP(x) + dx`` using a filtered copy of the
+            normalized input. The network always sees the unfiltered state.
+            Names must be stepped as residuals. ``lmax`` keeps degrees
+            ``l < lmax``. Empty default leaves the add unchanged.
         include_channel_mask_inputs: Whether to append per-variable mask indicator
             channels to the network input. When True, the network receives
             ``len(in_names)`` additional float channels (1.0 = present, 0.0 =
@@ -140,6 +147,9 @@ class SingleModuleStepConfig(StepConfigABC):
     next_step_forcing_names: list[str] = dataclasses.field(default_factory=list)
     prescribed_prognostic_names: list[str] = dataclasses.field(default_factory=list)
     residual_prediction: ResidualPredictionConfig | None = None
+    residual_lowpass: list[ResidualLowpassConfig] = dataclasses.field(
+        default_factory=list
+    )
     include_channel_mask_inputs: bool = False
     global_mean_removal: GlobalMeanRemovalConfigUnion | None = None
     input_dropout: VariableMaskingConfig | None = None
@@ -174,6 +184,23 @@ class SingleModuleStepConfig(StepConfigABC):
                         "residual_prediction.normalized requires a "
                         "normalization.residual block"
                     )
+        if self.residual_lowpass:
+            if self.residual_prediction is None:
+                raise ValueError("residual_lowpass requires residual_prediction")
+            seen: set[str] = set()
+            for entry in self.residual_lowpass:
+                for name in entry.names:
+                    if name in seen:
+                        raise ValueError(
+                            f"residual_lowpass name '{name}' is listed more than once"
+                        )
+                    seen.add(name)
+                    if name not in self.residual_names:
+                        raise ValueError(
+                            f"residual_lowpass name '{name}' is not stepped as a "
+                            "residual; residual names are "
+                            f"{sorted(self.residual_names)}"
+                        )
         if self.global_mean_removal is not None:
             self.global_mean_removal.validate_names(self.in_names, self.out_names)
         for name in self.prescribed_prognostic_names:
@@ -426,6 +453,14 @@ class SingleModuleStep(StepABC):
             }
         else:
             self._residual_transform = None
+        if config.residual_lowpass:
+            self._residual_lowpass: ResidualLowpass | None = (
+                ResidualLowpass.from_config(
+                    config.residual_lowpass, dataset_info
+                ).to(get_device())
+            )
+        else:
+            self._residual_lowpass = None
         if config.ocean is not None:
             self.ocean: Ocean | None = config.ocean.build(
                 config.in_names, config.out_names, dataset_info.timestep
@@ -567,6 +602,7 @@ class SingleModuleStep(StepABC):
             ocean=self.ocean,
             residual_names=self._residual_names,
             residual_transform=self._residual_transform,
+            residual_lowpass=self._residual_lowpass,
             prescribed_prognostic_names=self._config.prescribed_prognostic_names,
             global_mean_removal=self._global_mean_removal,
             data_mask=args.data_mask,
@@ -732,6 +768,7 @@ def step_with_adjustments(
     ocean: Ocean | None,
     residual_names: Collection[str] | None = None,
     residual_transform: TensorMapping | None = None,
+    residual_lowpass: ResidualLowpass | None = None,
     prescribed_prognostic_names: list[str] | None = None,
     global_mean_removal: GlobalMeanRemoval | None = None,
     data_mask: TensorMapping | None = None,
@@ -760,6 +797,10 @@ def step_with_adjustments(
             in normalized space, so a unit network output is one tendency
             standard deviation. Scale only; means are never applied. Must cover
             every name in ``residual_names``.
+        residual_lowpass: Optional truncations applied after ``residual_transform``
+            and before the residual add. ``None`` leaves the add unchanged.
+            Skip-target names are filtered on a copy of the normalized input;
+            the tensor passed to ``network_calls`` is not filtered.
         prescribed_prognostic_names: Prognostic names to overwrite from
             next_step_input_data after the ocean step (e.g. for inference).
         global_mean_removal: Optional transform that removes per-sample
@@ -805,7 +846,14 @@ def step_with_adjustments(
                 # invariant violation better surfaced than silently stepped
                 # full-field under the tendency convention.
                 output_norm[name] = output_norm[name] * residual_transform[name]
-        output_norm = add_names(input_norm, output_norm, residual_names)
+        if residual_lowpass is not None:
+            # Scale first, then truncate, so LP sees the increment that is added.
+            # filter_skip copies; input_norm itself stays what the network saw.
+            output_norm = residual_lowpass.filter_residual(output_norm)
+            skip_input = residual_lowpass.filter_skip(input_norm)
+        else:
+            skip_input = input_norm
+        output_norm = add_names(skip_input, output_norm, residual_names)
     output = normalizer.denormalize(output_norm)
     if global_mean_removal is not None:
         assert gmr_state is not None
