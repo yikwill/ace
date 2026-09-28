@@ -5,7 +5,7 @@ Modular `fix/` / `feature/` branches target `main`; everything under **Exp-only*
 
 ## Base
 
-- `origin/main` @ `05c5a050f168d64ebcfef50ca0a8317f17246d2f`
+- `origin/main` @ `e57469c1ddf1ed4b701bf81f3aba4d72137a8385`
 
 ## Modular branches
 
@@ -15,8 +15,9 @@ Modular `fix/` / `feature/` branches target `main`; everything under **Exp-only*
 | `fix/irfft-autograd` | Functional DC/Nyquist imag clearing in `fme/fft.py` (multi-step autograd) | — |
 | `feature/spherical-unet` | `SphericalUNet` / `NoiseConditionedSphericalUNet` model + ACE registry + tests (optional DISCO `theta_cutoff`; opt-in `unet_layout: classic`) | — |
 | `feature/ar-input-noise` | Training-time AR input noise: `TrainStepperConfig.ar_input_noise_sigma` scales prognostic state noise by `|true Δ|` after each train step | — |
-| `feature/residual-std-scale` | Opt-in `scale_residual_by_residual_std`: prognostic residual add uses `σ_res/σ_full` so the network predicts in residual units | — |
-| `feature/full-field-prognostics` | Opt-in `full_field_prognostic_names`: selected prognostics stay full-field under `residual_prediction` (skip residual add and residual loss stats) | **`feature/residual-std-scale`** |
+| `feature/residual-lowpass` | Opt-in `residual_lowpass`: spherical-harmonic truncation on the residual add (`x + LP(dx)` or `LP(x) + dx`). `lmax` keeps degrees `l < lmax` | — |
+| `feature/residual-std-scale` | Load legacy `scale_residual_by_residual_std` as `residual_prediction.normalized` (the scale itself is on main, and runs before the low-pass) | **`feature/residual-lowpass`** |
+| `feature/full-field-prognostics` | Load legacy `full_field_prognostic_names` as the complement of `residual_prediction.names`. Those names stay out of the residual add and cannot be low-passed. Loss scaling follows main | **`feature/residual-std-scale`** |
 | `feature/normalization-stat-overrides` | Spatial stats in `NormalizationConfig` plus `means_overrides` / `stds_overrides` lists (`{path, names}`) so selected fields can mix a time-mean map with residual std | — |
 | `fix/evaluator-sst-perturbation` | Evaluator `get_inference_data` forwards stepper ocean field names so loader SST perturbations can apply | — |
 
@@ -24,13 +25,13 @@ Modular `fix/` / `feature/` branches target `main`; everything under **Exp-only*
 
 Any order among independent leaves. Stacks (parent then child, or stack tip after the parent is on `main`):
 
-1. `feature/residual-std-scale` then `feature/full-field-prognostics`
+1. `feature/residual-lowpass` then `feature/residual-std-scale` then `feature/full-field-prognostics`
 
 ### Reconstruct merges
 
 Any order among independent leaves; for stacks merge the tip only:
 
-- `feature/full-field-prognostics` (contains `feature/residual-std-scale`)
+- `feature/full-field-prognostics` (contains `feature/residual-lowpass` and `feature/residual-std-scale`)
 - `feature/normalization-stat-overrides`
 
 ## Exp-only (do not PR to main as-is)
@@ -42,6 +43,7 @@ Any order among independent leaves; for stacks merge the tip only:
 - `configs/experiments/s2unet/config-train-era5-residual-prediction-res-scaled-classic.yaml`
 - `configs/experiments/s2unet/config-train-era5-classic-time-mean-centering.yaml`
 - `configs/experiments/s2unet/config-infer-era5-1980-2025.yaml`
+- `configs/experiments/s2unet/config-infer-era5-1980-2020-enso.yaml`
 - `configs/experiments/s2unet/config-infer-era5-1996-1997.yaml`
 - `configs/experiments/s2unet/config-infer-era5-1996-1997-sst-p2k.yaml`
 - `configs/experiments/s2unet/config-infer-era5-1996-1997-sst-p4k.yaml`
@@ -51,6 +53,8 @@ Any order among independent leaves; for stacks merge the tip only:
 - `configs/experiments/s2unet/config-train-era5-residual-prediction-classic-pressfc-full-field.yaml`
 - `configs/experiments/s2unet/config-train-era5-residual-prediction-classic-pressfc-full-field-residual-std.yaml`
 - `configs/experiments/s2unet/config-train-era5-sfno-baseline.yaml`
+- `configs/experiments/s2unet/config-train-s2unet-era5-residual-pressfc-lowpass64.yaml`
+- `configs/experiments/s2unet/config-train-s2unet-era5-residual-pressfc-skip-lowpass32.yaml`
 - `fme/core/distributed/torch_distributed.py`: global `broadcast_buffers=False` for DDP (DISCO/SHT buffer workaround). Needs a narrower design before any `fix/` PR.
 - This file (`COMPOSITION.md`)
 
@@ -69,6 +73,7 @@ git fetch yikwill-ace-fork \
   feature/ar-input-noise \
   feature/full-field-prognostics \
   feature/normalization-stat-overrides \
+  feature/residual-lowpass \
   fix/evaluator-sst-perturbation
 
 git checkout -B exp/s2unet origin/main
